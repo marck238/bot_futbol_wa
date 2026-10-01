@@ -2,19 +2,29 @@
 import asyncio
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Importa aquí las funciones o la instancia de tu bot de Telegram
-# Ejemplo: from bot_telegram import application
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+# Configurar la aplicación de Telegram
+telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+# --- AGREGA AQUÍ TUS HANDLERS/COMANDOS ---
+# Ejemplo:
+# telegram_app.add_handler(CommandHandler("start", start_command))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Código que se ejecuta al arrancar el servidor
-    # Si usas python-telegram-bot v20+:
-    # asyncio.create_task(application.start())
-    # asyncio.create_task(application.updater.start_polling())
+    # Inicializar y arrancar el bot de Telegram en segundo plano
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
+    print(">>> Bot de Telegram iniciado en Render <<<")
     yield
-    # Código que se ejecuta al apagar el servidor
-    # await application.stop()
+    # Apagar el bot limpiamente al detener el servicio
+    await telegram_app.updater.stop()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
