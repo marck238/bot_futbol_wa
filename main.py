@@ -1,329 +1,215 @@
-﻿import os
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from sqlalchemy import select
-
+import os
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes
+    ContextTypes,
 )
-
-from database import init_db, AsyncSessionLocal, User, Filter
-from analytics import calculate_kelly_stake
 from odds_api import get_upcoming_ev_picks, get_best_parlays
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
+# Configuración de Logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
+# Tokens desde variables de entorno
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-def get_main_menu_keyboard():
-    """Genera la botonera principal del bot."""
-    keyboard = [
-        [
-            InlineKeyboardButton("⏳ Próximas 4 Horas", callback_data="time_4h"),
-            InlineKeyboardButton("📅 Hoy", callback_data="time_today"),
-        ],
-        [
-            InlineKeyboardButton("📆 Mañana", callback_data="time_tomorrow"),
-            InlineKeyboardButton("📆 Pasado Mañana", callback_data="time_pasado_manana"),
-        ],
-        [
-            InlineKeyboardButton("⚽ Próximo Finde", callback_data="time_weekend"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Las Mejores de Hoy", callback_data="top_today"),
-            InlineKeyboardButton("💎 Top 3 Días (EV+)", callback_data="top_3days"),
-        ],
-        [
-            InlineKeyboardButton("🎟️ Combinadas EV+", callback_data="menu_parlays"),
-            InlineKeyboardButton("⚙️ Mis Filtros", callback_data="menu_filters"),
-        ],
-        [
-            InlineKeyboardButton("📊 Calculadora Kelly", callback_data="calc_kelly"),
-        ]
+# Keyboards
+main_keyboard = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("⏳ Próximas 4 Hs", callback_data="hours_4"),
+        InlineKeyboardButton("📅 Hoy", callback_data="today")
+    ],
+    [
+        InlineKeyboardButton("📆 Mañana", callback_data="tomorrow"),
+        InlineKeyboardButton("📆 Pasado Mañana", callback_data="day_after")
+    ],
+    [
+        InlineKeyboardButton("⚽ Fin de Semana", callback_data="weekend"),
+        InlineKeyboardButton("🎟️ Combinada EV+", callback_data="parlay")
     ]
-    return InlineKeyboardMarkup(keyboard)
+])
+
+back_keyboard = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="main_menu")]
+])
 
 
-def get_parlays_menu_keyboard():
-    """Genera el submenú de opciones para apuestas combinadas."""
-    keyboard = [
-        [
-            InlineKeyboardButton("🎟️ Combinada de Hoy", callback_data="parlay_today"),
-            InlineKeyboardButton("🎟️ Combinada de Mañana", callback_data="parlay_tomorrow"),
-        ],
-        [
-            InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="main_menu")
-        ]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-async def get_or_create_user(telegram_id: int):
-    """Registra o recupera al usuario en la base de datos Neon PostgreSQL."""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            role = "ADMIN" if ADMIN_ID and str(telegram_id) == str(ADMIN_ID) else "USER"
-            user = User(telegram_id=telegram_id, role=role, status="ACTIVE")
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
-        return user
-
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador del comando /start."""
-    telegram_id = update.effective_user.id
-
-    if ADMIN_ID and str(telegram_id) != str(ADMIN_ID):
-        await update.message.reply_text("⛔ Acceso denegado. Este bot es de uso privado.")
-        return
-
-    await get_or_create_user(telegram_id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /start - Envía el menú principal."""
+    user = update.effective_user
     welcome_text = (
-        "⚽ **Panel de Pronósticos Pre-Partido — NosticProno**\n\n"
-        "Selecciona una opción para escanear eventos individuales o armar **combinadas de valor (EV+)**:"
+        f"👋 ¡Hola, <b>{user.first_name}</b>!\n\n"
+        "🤖 Bienvenid@ a tu bot de <b>Pronósticos de Valor Esperado (EV+)</b>.\n\n"
+        "Selecciona una opción del menú para consultar los mejores pronósticos "
+        "calculados con el modelo cuantitativo de Poisson y cuotas en tiempo real:"
     )
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode="Markdown",
-        reply_markup=get_main_menu_keyboard()
-    )
-
-
-async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador central de eventos para los botones interactivos."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "time_4h":
-        await render_predictions(query, title="⏳ Partidos en las Próximas 4 Horas", hours=4)
-    elif data == "time_today":
-        await render_predictions(query, title="📅 Pronósticos para Hoy", hours=24)
-    elif data == "time_tomorrow":
-        await render_predictions(query, title="📆 Pronósticos para Mañana", days_offset=1)
-    elif data == "time_pasado_manana":
-        await render_predictions(query, title="📆 Pronósticos para Pasado Mañana", days_offset=2)
-    elif data == "time_weekend":
-        await render_predictions(query, title="⚽ Pronósticos para el Próximo Fin de Semana", is_weekend=True)
-    elif data == "top_today":
-        await render_predictions(query, title="⭐ LAS MEJORES APUESTAS DE HOY (EV+ Máximo)", hours=24, min_ev_filter=5.0)
-    elif data == "top_3days":
-        await render_predictions(query, title="💎 TOP PICKS DE LOS PRÓXIMOS 3 DÍAS", hours=72, min_ev_filter=6.0)
-    elif data == "menu_parlays":
-        msg = (
-            "🎟️ **Panel de Apuestas Combinadas (EV+)**\n\n"
-            "El bot selecciona automáticamente las mejores opciones con EV+ positivo "
-            "(mínimo 2 y máximo 4 partidos por ticket) y calcula la cuota acumulada y el stake óptimo."
-        )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=get_parlays_menu_keyboard())
-    elif data == "parlay_today":
-        await render_parlays(query, title="🎟️ Combinada de Hoy", hours=24)
-    elif data == "parlay_tomorrow":
-        await render_parlays(query, title="🎟️ Combinada de Mañana", days_offset=1)
-    elif data == "menu_filters":
-        await show_user_filters(query)
-    elif data == "calc_kelly":
-        msg = (
-            "📊 **Calculadora de Criterio de Kelly**\n\n"
-            "Para usar la calculadora envía:\n"
-            "`/kelly <probabilidad_%> <cuota_casa> [tu_banca]`\n\n"
-            "Ejemplo:\n`/kelly 65 1.90 1000`"
-        )
-        back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú", callback_data="main_menu")]])
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_button)
-    elif data == "main_menu":
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        welcome_text = (
-            "⚽ **Panel de Pronósticos Pre-Partido — NosticProno**\n\n"
-            "Selecciona un rango de tiempo para escanear eventos con Valor Esperado Positivo (EV+):"
-        )
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=welcome_text,
-            parse_mode="Markdown",
-            reply_markup=get_main_menu_keyboard()
+    if update.message:
+        await update.message.reply_text(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=main_keyboard
         )
 
 
 async def render_predictions(
     query,
     title: str,
-    hours: int = None,
-    days_offset: int = None,
+    hours: int | None = None,
+    days_offset: int | None = None,
     is_weekend: bool = False,
     min_ev_filter: float = 0.0
 ):
-    """Renderiza predicciones de partidos individuales."""
-    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="main_menu")]])
-    await query.edit_message_text(f"🔍 *Escaneando eventos y cuotas reales para {title}...*", parse_mode="Markdown")
+    """Procesa y renderiza las predicciones de la API o muestra mensajes de error diagnósticos."""
+    await query.answer()
 
     api_res = await get_upcoming_ev_picks(
         hours=hours,
         days_offset=days_offset,
         is_weekend=is_weekend,
-        min_ev=min_ev_filter
+        min_ev_filter=min_ev_filter
     )
 
-    if api_res["status"] == "NO_API_KEY":
+    status = api_res.get("status")
+
+    if status == "NO_API_KEY":
         msg = (
-            f"📊 **{title}**\n\n"
-            "⚠️ **API Key no detectada**\n"
-            "Agrega la variable `ODDS_API_KEY` en Render."
+            "❌ <b>API Key No Configurada</b>\n\n"
+            "No se encontró la variable <code>ODDS_API_KEY</code> en Render.\n\n"
+            "👉 <b>Solución:</b> Ve a Render > Environment Variables y agrega <code>ODDS_API_KEY</code> con tu clave."
         )
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
         return
 
-    picks = api_res["data"]
-    response = f"📊 **{title}**\n\n"
+    if status == "INVALID_KEY":
+        msg = (
+            "❌ <b>API Key Inválida</b>\n\n"
+            "La clave de API ingresada no es válida o ha caducado.\n\n"
+            "👉 <b>Solución:</b> Revisa tu clave en https://the-odds-api.com y actualízala en Render."
+        )
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
+        return
 
+    if status == "QUOTA_EXCEEDED":
+        msg = (
+            "⚠️️ <b>Límite de API Alcanzado</b>\n\n"
+            "Se ha agotado el cupo mensual gratuito (500 peticiones) de The Odds API.\n\n"
+            "👉 <b>Solución:</b> La cuota se reinicia al inicio de cada mes o puedes registrar otra API Key gratuita."
+        )
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
+        return
+
+    picks = api_res.get("data", [])
     if not picks:
-        response += "⚠️ No se encontraron partidos con Valor Esperado positivo (EV+) para este rango de tiempo."
-    else:
-        for idx, item in enumerate(picks, start=1):
-            response += (
-                f"**{idx}. {item['match']}** ({item['league']})\n"
-                f"⏰ Hora: `{item['time']}` | Mercado: `{item['market']}`\n"
-                f"📈 Prob. Estimada: `{item['prob']}%` | Cuota Casa: `{item['bookmaker_odd']}`\n"
-                f"🔥 **EV: `+{item['ev']}%`** | Stake Sugerido: `{item['stake']}%`\n"
-                f"───────────────\n"
-            )
+        msg = (
+            f"<b>{title}</b>\n\n"
+            "⚠️ No se encontraron partidos con EV+ en este momento.\n\n"
+            "💡 <i>Tip: Prueba presionando 📅 Hoy o 📆 Mañana para buscar en un rango más amplio.</i>"
+        )
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
+        return
 
-    await query.edit_message_text(response, parse_mode="Markdown", reply_markup=back_keyboard)
+    text_lines = [f"📊 <b>{title}</b>\n"]
+    for idx, pick in enumerate(picks[:10], 1):
+        text_lines.append(
+            f"{idx}. <b>{pick['match']}</b> ({pick['league']})\n"
+            f"⏰ Hora: <b>{pick['time']}</b> | Mercado: <b>{pick['best_pick']}</b>\n"
+            f"📈 Prob. Estimada: <b>{pick['prob']}%</b> | Cuota: <b>{pick['odd']}</b> ({pick['bookmaker']})\n"
+            f"🔥 EV: <b>+{pick['ev']}%</b> | Stake Sugerido: <b>{pick['stake_pct']}% (${pick['stake_amount']})</b>\n"
+            f"───────────────"
+        )
+
+    full_text = "\n".join(text_lines)
+    await query.edit_message_text(full_text, parse_mode="HTML", reply_markup=back_keyboard)
 
 
-async def render_parlays(query, title: str, hours: int = None, days_offset: int = None):
-    """Renderiza el ticket de la mejor apuesta combinada detectada."""
-    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú de Combinadas", callback_data="menu_parlays")]])
-    await query.edit_message_text(f"🔍 *Calculando la mejor combinada con EV+ para {title}...*", parse_mode="Markdown")
+async def render_parlay(query):
+    """Genera y renderiza combinadas calculando EV compuesto."""
+    await query.answer()
 
-    res = await get_best_parlays(hours=hours, days_offset=days_offset)
+    res = await get_best_parlays(hours=48)
+    status = res.get("status")
 
-    if res["status"] == "NO_API_KEY":
-        msg = "⚠️ **API Key no detectada.** Por favor configura `ODDS_API_KEY` en Render."
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
+    if status == "NO_API_KEY":
+        msg = "❌ <b>API Key No Configurada en Render.</b>"
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
         return
 
     parlay = res.get("parlay")
-
     if not parlay:
-        msg = f"🎟️ **{title}**\n\n⚠️ No hay suficientes partidos independientes con EV+ positivo en este rango para armar un ticket combinado (se requieren al menos 2 partidos distintos)."
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
-        return
-
-    response = (
-        f"🎟️ **{title} ({parlay['legs_count']} Partidos)**\n"
-        f"───────────────\n"
-    )
-
-    for idx, leg in enumerate(parlay["legs"], start=1):
-        response += (
-            f"📌 **Leg {idx}: {leg['match']}** ({leg['league']})\n"
-            f"⏰ Hora: `{leg['time']}` | Mercado: `{leg['market']}`\n"
-            f"📈 Prob. Individual: `{leg['prob']}%` | Cuota: `{leg['bookmaker_odd']}`\n"
-            f"───────────────\n"
-        )
-
-    response += (
-        f"📊 **RESUMEN DE LA COMBINADA:**\n"
-        f"🏛️ **Cuota Total Acumulada: `{parlay['total_odd']}`**\n"
-        f"📈 **Probabilidad Conjunta: `{parlay['total_prob_pct']}%`**\n"
-        f"🔥 **Valor Esperado Acumulado (EV): `+{parlay['total_ev']}%`**\n"
-        f"💵 **Stake Recomendado: `{parlay['recommended_stake_pct']}%` de banca**\n\n"
-        f"💡 *Nota: Se aplica un Kelly Fraccionado conservador debido a la varianza de apuestas múltiples.*"
-    )
-
-    await query.edit_message_text(response, parse_mode="Markdown", reply_markup=back_keyboard)
-
-
-async def show_user_filters(query):
-    """Muestra los filtros guardados del usuario."""
-    telegram_id = query.from_user.id
-    async with AsyncSessionLocal() as session:
-        res_user = await session.execute(select(User).where(User.telegram_id == telegram_id))
-        user = res_user.scalar_one_or_none()
-        back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú", callback_data="main_menu")]])
-
-        if not user:
-            await query.edit_message_text("❌ Usuario no registrado.", reply_markup=back_keyboard)
-            return
-
-        res_filters = await session.execute(select(Filter).where(Filter.user_id == user.id))
-        filters = res_filters.scalars().all()
-
-        if not filters:
-            msg = "⚙️ **Mis Filtros Guardados**\n\nNo tienes filtros configurados."
-            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
-            return
-
-        msg = "⚙️ **Tus Filtros Pre-Partido Activos:**\n\n"
-        for f in filters:
-            msg += f"🔹 **{f.name}** [{f.market}] | Min EV: `+{f.min_ev}%`\n"
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
-
-
-async def kelly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /kelly."""
-    if len(context.args) < 2:
-        await update.message.reply_text("Uso: `/kelly <probabilidad_%> <cuota> [banca]`", parse_mode="Markdown")
-        return
-
-    try:
-        prob = float(context.args[0])
-        odd = float(context.args[1])
-        bankroll = float(context.args[2]) if len(context.args) >= 3 else 1000.0
-
-        res = calculate_kelly_stake(prob, odd, bankroll)
-        if not res.get("has_value"):
-            await update.message.reply_text(f"⚠️️ {res['message']}")
-            return
-
         msg = (
-            f"📈 **Criterio de Kelly Pre-Partido**\n\n"
-            f"🔹 EV: `+{res['expected_value_pct']}%`\n"
-            f"🎯 Stake Sugerido: `{res['recommended_stake_pct']}%`\n"
-            f"💵 Monto: `${res['recommended_amount']}`"
+            "🎟️ <b>Combinada Sugerida EV+</b>\n\n"
+            "⚠️ No hay suficientes selecciones individuales con EV+ para armar una combinada en este momento."
         )
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ Ingresa valores numéricos válidos.")
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
+        return
+
+    legs_text = []
+    for idx, leg in enumerate(parlay["legs"], 1):
+        legs_text.append(
+            f"  {idx}. <b>{leg['match']}</b>\n"
+            f"     • Selección: {leg['best_pick']}\n"
+            f"     • Cuota: {leg['odd']} | Prob: {leg['prob']}%"
+        )
+
+    legs_str = "\n".join(legs_text)
+    msg = (
+        f"🎟️ <b>Combinada Sugerida EV+ ({parlay['legs_count']} Selecciones)</b>\n\n"
+        f"📋 <b>Legs:</b>\n{legs_str}\n\n"
+        f"📊 <b>Totales de la Combinada:</b>\n"
+        f"• Cuota Total: <b>{parlay['total_odd']}</b>\n"
+        f"• Probabilidad Implícita: <b>{parlay['total_prob_pct']}%</b>\n"
+        f"• EV Compuesto: <b>+{parlay['total_ev']}%</b>\n"
+        f"• Stake Conservador Sugerido: <b>{parlay['recommended_stake_pct']}%</b>"
+    )
+
+    await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
 
 
-# Aplicación Telegram y FastAPI
-telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(CommandHandler("kelly", kelly_command))
-telegram_app.add_handler(CallbackQueryHandler(button_callback_handler))
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador global de eventos de botones en Telegram."""
+    query = update.callback_query
+    data = query.data
+
+    if data == "main_menu":
+        await query.answer()
+        await query.edit_message_text(
+            "🤖 <b>Menú Principal de Pronósticos</b>\n\nSelecciona una opción:",
+            parse_mode="HTML",
+            reply_markup=main_keyboard
+        )
+    elif data == "hours_4":
+        await render_predictions(query, "Partidos en las Próximas 4 Horas", hours=4)
+    elif data == "today":
+        await render_predictions(query, "Pronósticos para Hoy", days_offset=0)
+    elif data == "tomorrow":
+        await render_predictions(query, "Pronósticos para Mañana", days_offset=1)
+    elif data == "day_after":
+        await render_predictions(query, "Pronósticos para Pasado Mañana", days_offset=2)
+    elif data == "weekend":
+        await render_predictions(query, "Pronósticos para el Próximo Fin de Semana", is_weekend=True)
+    elif data == "parlay":
+        await render_parlay(query)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db()
-    print(">>> Tablas Pre-Partido inicializadas en Neon DB <<<")
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling(drop_pending_updates=True)
-    print(">>> NosticProno listo con módulo de combinadas EV+ <<<")
-    yield
-    await telegram_app.updater.stop()
-    await telegram_app.stop()
-    await telegram_app.shutdown()
+def main():
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Error: TELEGRAM_BOT_TOKEN no configurado en el entorno.")
+        return
+
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    logger.info("Bot en marcha y escuchando peticiones...")
+    app.run_polling()
 
 
-app = FastAPI(lifespan=lifespan)
-
-
-@app.api_route("/", methods=["GET", "HEAD"])
-@app.api_route("/health", methods=["GET", "HEAD"])
-def health_check():
-    return {"status": "ok", "bot": "NosticProno", "state": "online"}
+if __name__ == "__main__":
+    main()
