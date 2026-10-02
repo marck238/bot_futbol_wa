@@ -1,6 +1,8 @@
 ﻿import os
-from fastapi import FastAPI
 from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from sqlalchemy import select
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -8,15 +10,18 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes
 )
-from sqlalchemy import select
+
 from database import init_db, AsyncSessionLocal, User, Filter
 from analytics import calculate_kelly_stake
 from odds_api import get_upcoming_ev_picks
 
+# Configuración de variables de entorno
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
+
 def get_main_menu_keyboard():
+    """Genera la botonera principal con opciones de navegación."""
     keyboard = [
         [
             InlineKeyboardButton("⏳ Próximas 4 Horas", callback_data="time_4h"),
@@ -40,33 +45,45 @@ def get_main_menu_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 async def get_or_create_user(telegram_id: int):
+    """Registra o recupera al usuario en la base de datos Neon PostgreSQL."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
         if not user:
-            role = "ADMIN" if str(telegram_id) == str(ADMIN_ID) else "USER"
+            role = "ADMIN" if ADMIN_ID and str(telegram_id) == str(ADMIN_ID) else "USER"
             user = User(telegram_id=telegram_id, role=role, status="ACTIVE")
             session.add(user)
             await session.commit()
             await session.refresh(user)
         return user
 
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador del comando /start. Muestra la bienvenida y el menú interactivo."""
     telegram_id = update.effective_user.id
+
+    # Control de acceso opcional para modo privado
     if ADMIN_ID and str(telegram_id) != str(ADMIN_ID):
         await update.message.reply_text("⛔ Acceso denegado. Este bot es de uso privado.")
         return
 
     await get_or_create_user(telegram_id)
     welcome_text = (
-        "⚽ **Panel de Pronósticos Pre-Partido**\n\n"
+        "⚽ **Panel de Pronósticos Pre-Partido — NosticProno**\n\n"
         "Selecciona un rango de tiempo para escanear los partidos programados, "
         "las cuotas reales y encontrar pronósticos con Valor Esperado Positivo (EV+):"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode="Markdown",
+        reply_markup=get_main_menu_keyboard()
+    )
+
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manejador global de eventos al presionar cualquier botón interactivo."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -97,14 +114,44 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú", callback_data="main_menu")]])
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_button)
     elif data == "main_menu":
-        welcome_text = "⚽ **Panel de Pronósticos Pre-Partido**\n\nSelecciona una opción:"
-        await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
+        # 1. Remueve el botón del mensaje de pronósticos para dejarlo limpio en el historial
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
-async def render_predictions(query, title: str, hours: int = None, days_offset: int = None, is_weekend: bool = False, min_ev_filter: float = 0.0):
+        # 2. Envía la botonera principal como un MENSAJE NUEVO abajo
+        welcome_text = (
+            "⚽ **Panel de Pronósticos Pre-Partido — NosticProno**\n\n"
+            "Selecciona un rango de tiempo para escanear eventos con Valor Esperado Positivo (EV+):"
+        )
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=welcome_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu_keyboard()
+        )
+
+
+async def render_predictions(
+    query,
+    title: str,
+    hours: int = None,
+    days_offset: int = None,
+    is_weekend: bool = False,
+    min_ev_filter: float = 0.0
+):
+    """Escanea eventos reales en The Odds API y renderiza los resultados en el chat."""
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="main_menu")]])
+    
     await query.edit_message_text(f"🔍 *Escaneando eventos y cuotas reales para {title}...*", parse_mode="Markdown")
 
-    api_res = await get_upcoming_ev_picks(hours=hours, days_offset=days_offset, is_weekend=is_weekend, min_ev=min_ev_filter)
+    api_res = await get_upcoming_ev_picks(
+        hours=hours,
+        days_offset=days_offset,
+        is_weekend=is_weekend,
+        min_ev=min_ev_filter
+    )
 
     if api_res["status"] == "NO_API_KEY":
         msg = (
@@ -136,7 +183,9 @@ async def render_predictions(query, title: str, hours: int = None, days_offset: 
 
     await query.edit_message_text(response, parse_mode="Markdown", reply_markup=back_keyboard)
 
+
 async def show_user_filters(query):
+    """Consulta y muestra los filtros personalizados del usuario desde Neon DB."""
     telegram_id = query.from_user.id
     async with AsyncSessionLocal() as session:
         res_user = await session.execute(select(User).where(User.telegram_id == telegram_id))
@@ -170,9 +219,14 @@ async def show_user_filters(query):
             )
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
 
+
 async def kelly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando /kelly para calcular el stake óptimo sobre cualquier evento."""
     if len(context.args) < 2:
-        await update.message.reply_text("Uso: `/kelly <probabilidad_%> <cuota> [banca]`\nEjemplo: `/kelly 62 1.90 1000`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "Uso: `/kelly <probabilidad_%> <cuota> [banca]`\nEjemplo: `/kelly 62 1.90 1000`",
+            parse_mode="Markdown"
+        )
         return
 
     try:
@@ -195,11 +249,15 @@ async def kelly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Ingresa valores numéricos válidos.")
 
+
+# Configuración del bot de Telegram
 telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(CommandHandler("kelly", kelly_command))
 telegram_app.add_handler(CallbackQueryHandler(button_callback_handler))
 
+
+# Ciclo de vida de FastAPI para Render
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -207,15 +265,17 @@ async def lifespan(app: FastAPI):
     await telegram_app.initialize()
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=True)
-    print(">>> Bot con API de partidos reales en tiempo real listo <<<")
+    print(">>> NosticProno listo con menú, cuotas en tiempo real e historial activo <<<")
     yield
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
 
+
 app = FastAPI(lifespan=lifespan)
+
 
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "ok", "bot": "online"}
+    return {"status": "ok", "bot": "NosticProno", "state": "online"}
