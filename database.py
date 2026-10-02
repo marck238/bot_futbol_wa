@@ -5,11 +5,15 @@ from sqlalchemy import BigInteger, String, DateTime, func
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Normalizar URL para asyncpg si proviene de Render/Neon sin la sub-rutina
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+# Normalización automática para asyncpg (reemplaza prefijo y sslmode)
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+    
+    # asyncpg requiere ssl=require en lugar de sslmode=require
+    DATABASE_URL = DATABASE_URL.replace("sslmode=require", "ssl=require")
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -22,8 +26,8 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
-    role: Mapped[str] = mapped_column(String, default="USER")  # "ADMIN" o "USER"
-    status: Mapped[str] = mapped_column(String, default="ACTIVE")  # "ACTIVE" o "BLOCKED"
+    role: Mapped[str] = mapped_column(String, default="USER")
+    status: Mapped[str] = mapped_column(String, default="ACTIVE")
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 async def init_db():
