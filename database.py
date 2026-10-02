@@ -2,7 +2,7 @@ import os
 from urllib.parse import urlparse, urlunparse
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import BigInteger, String, DateTime, Float, Integer, Boolean, ForeignKey, func
+from sqlalchemy import BigInteger, String, DateTime, Float, Boolean, ForeignKey, func
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -43,16 +43,15 @@ class Filter(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    market: Mapped[str] = mapped_column(String(50), default="CORNERS")  # CORNERS, GOALS, CARDS
-    min_appm: Mapped[float] = mapped_column(Float, default=1.0)  # Ataques Peligrosos Por Minuto
-    min_corners: Mapped[int] = mapped_column(Integer, default=0)
-    min_odd: Mapped[float] = mapped_column(Float, default=1.80)
+    market: Mapped[str] = mapped_column(String(50), default="OVER_2.5_GOALS")  # OVER_2.5, OVER_1.5, BOTH_TEAMS_SCORE, CORNERS_9.5
+    min_expected_prob: Mapped[float] = mapped_column(Float, default=60.0)      # Probabilidad Poisson Mínima (%)
+    min_odd: Mapped[float] = mapped_column(Float, default=1.70)               # Cuota Mínima exigida
+    min_ev: Mapped[float] = mapped_column(Float, default=3.0)                  # Valor Esperado Mínimo EV+ (%)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User"] = relationship("User", back_populates="filters")
 
 async def init_db():
-    """Crea o actualiza las tablas en Neon."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
