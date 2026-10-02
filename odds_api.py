@@ -1,51 +1,33 @@
 import os
+import math
+import asyncio
 import httpx
 from datetime import datetime, timezone, timedelta
-import math
-from analytics import calculate_kelly_stake
+import logging
 
-ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+logger = logging.getLogger(__name__)
 
-# Zona horaria local (Uruguay / Argentina GMT-3)
-LOCAL_TZ = timezone(timedelta(hours=-3))
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
+LOCAL_TZ = timezone(timedelta(hours=-3)) # Uruguay / Argentina (UTC-3)
 
-# Ligas principales de fútbol en The Odds API
-FEATURED_SPORTS = [
+DEFAULT_SOCCER_LEAGUES = [
     "soccer_epl",
     "soccer_spain_la_liga",
-    "soccer_italy_serie_a",
     "soccer_germany_bundesliga",
+    "soccer_italy_serie_a",
     "soccer_france_ligue_one",
-    "soccer_conmebol_copa_libertadores",
-    "soccer_conmebol_copa_sudamericana",
-    "soccer_argentina_primera_division",
-    "soccer_brazil_campeonato",
-    "soccer_usa_mls",
     "soccer_uefa_champs_league",
     "soccer_uefa_europa_league",
-    "soccer_mexico_ligamx",
-    "soccer_portugal_primeira_liga",
-    "soccer_netherlands_eredivisie",
-    "soccer_turkey_super_league",
-    "soccer_chile_campeonato",
-    "soccer_colombia_categoria_primera_a",
-    "soccer_japan_j_league",
-    "soccer_korea_kleague1",
-    "soccer_spl",
-    "soccer_australia_aleague"
+    "soccer_argentina_primera_division",
+    "soccer_brazil_campeonato"
 ]
 
-
 def poisson_pmf(k: int, lamb: float) -> float:
-    """Probabilidad puntual de Poisson P(X=k)."""
+    if lamb <= 0:
+        return 1.0 if k == 0 else 0.0
     return (math.pow(lamb, k) * math.exp(-lamb)) / math.factorial(k)
 
-
-def calculate_poisson_matrix(home_exp: float, away_exp: float):
-    """
-    Construye la matriz de marcadores exactos (hasta 8x8)
-    y calcula probabilidades independientes para los mercados principales.
-    """
+def calculate_poisson_probabilities(home_exp: float, away_exp: float):
     scores = {}
     prob_home = 0.0
     prob_draw = 0.0
@@ -80,21 +62,86 @@ def calculate_poisson_matrix(home_exp: float, away_exp: float):
         "Over 3.5 Goles": round(prob_over_3_5 * 100, 2)
     }
 
+def calculate_ev(odds: float, win_probability_pct: float) -> float:
+    p = win_probability_pct / 100.0
+    if odds <= 1.0 or p <= 0:
+        return -100.0
+    ev = (p * (odds - 1.0) - (1.0 - p)) * 100.0
+    return round(ev, 2)
+
+def calculate_kelly_stake(odds: float, win_probability_pct: float, bankroll: float = 1000.0, fraction: float = 0.25) -> dict:
+    p = win_probability_pct / 100.0
+    b = odds - 1.0
+    if b <= 0 or p <= 0:
+        return {"stake_pct": 0.0, "amount": 0.0}
+    q = 1.0 - p
+    f_star = (b * p - q) / b
+    if f_star <= 0:
+        return {"stake_pct": 0.0, "amount": 0.0}
+    
+    f_adjusted = f_star * fraction
+    stake_pct = min(f_adjusted * 100.0, 5.0)
+    amount = round((stake_pct / 100.0) * bankroll, 2)
+    return {"stake_pct": round(stake_pct, 2), "amount": amount}
+
+async def fetch_active_soccer_sports(client: httpx.AsyncClient, api_key: str) -> tuple[list[str], str | None]:
+    """Obtiene ligas de fútbol activas desde /v4/sports (0 créditos)."""
+    url = f"https://api.the-odds-api.com/v4/sports/?apiKey={api_key}"
+    try:
+        resp = await client.get(url, timeout=10.0)
+        if resp.status_code == 401:
+            return [], "INVALID_KEY"
+        if resp.status_code == 429:
+            return [], "QUOTA_EXCEEDED"
+        if resp.status_code != 200:
+            return DEFAULT_SOCCER_LEAGUES, None
+        
+        sports = resp.json()
+        active_soccer = [
+            s["key"] for s in sports 
+            if s.get("active") is True and (s.get("group") == "Soccer" or s.get("key", "").startswith("soccer_"))
+        ]
+        return active_soccer if active_soccer else DEFAULT_SOCCER_LEAGUES, None
+    except Exception as e:
+        logger.error(f"Error al obtener ligas activas: {e}")
+        return DEFAULT_SOCCER_LEAGUES, None
+
+async def fetch_odds_for_sport(client: httpx.AsyncClient, sport_key: str, api_key: str) -> tuple[list[dict], str | None]:
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+    params = {
+        "apiKey": api_key,
+        "regions": "eu,us,uk,au",
+        "markets": "h2h,totals",
+        "dateFormat": "iso",
+        "oddsFormat": "decimal"
+    }
+    try:
+        resp = await client.get(url, params=params, timeout=10.0)
+        if resp.status_code == 401:
+            return [], "INVALID_KEY"
+        if resp.status_code == 429:
+            return [], "QUOTA_EXCEEDED"
+        if resp.status_code == 200:
+            return resp.json(), None
+        return [], None
+    except Exception as e:
+        logger.error(f"Error al obtener cuotas de {sport_key}: {e}")
+        return [], None
 
 async def get_upcoming_ev_picks(
-    hours: int = None,
-    days_offset: int = None,
+    hours: int | None = None,
+    days_offset: int | None = None,
     is_weekend: bool = False,
-    min_ev: float = 0.0
+    min_ev_filter: float = 0.0
 ) -> dict:
     if not ODDS_API_KEY:
-        return {"status": "NO_API_KEY", "data": []}
+        return {"status": "NO_API_KEY", "message": "No se encontró ODDS_API_KEY en las variables de entorno."}
 
     now = datetime.now(timezone.utc)
-
-    # Definir rango de tiempo en UTC
+    
+    # Configuración de rangos de tiempo
     if hours:
-        time_start = now
+        time_start = now - timedelta(minutes=15)
         time_end = now + timedelta(hours=hours)
     elif days_offset is not None:
         now_local = now.astimezone(LOCAL_TZ)
@@ -103,186 +150,145 @@ async def get_upcoming_ev_picks(
         time_end_local = target_local.replace(hour=23, minute=59, second=59, microsecond=0)
         time_start = time_start_local.astimezone(timezone.utc)
         time_end = time_end_local.astimezone(timezone.utc)
+        if days_offset == 0:
+            time_start = max(time_start, now - timedelta(minutes=15))
     elif is_weekend:
         now_local = now.astimezone(LOCAL_TZ)
-        days_until_saturday = (5 - now_local.weekday()) % 7
-        if days_until_saturday == 0 and now_local.weekday() != 5:
-            days_until_saturday = 7
-        saturday = now_local + timedelta(days=days_until_saturday)
-        time_start_local = saturday.replace(hour=0, minute=0, second=0, microsecond=0)
-        time_end_local = (saturday + timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
-        time_start = time_start_local.astimezone(timezone.utc)
-        time_end = time_end_local.astimezone(timezone.utc)
+        days_until_sat = (5 - now_local.weekday()) % 7
+        sat_local = (now_local + timedelta(days=days_until_sat)).replace(hour=0, minute=0, second=0, microsecond=0)
+        sun_local = (sat_local + timedelta(days=1)).replace(hour=23, minute=59, second=59, microsecond=0)
+        time_start = sat_local.astimezone(timezone.utc)
+        time_end = sun_local.astimezone(timezone.utc)
     else:
-        time_start = now
+        time_start = now - timedelta(minutes=15)
         time_end = now + timedelta(hours=24)
 
-    results = []
+    all_matches = []
+    error_status = None
 
-    async with httpx.AsyncClient(timeout=12.0) as client:
-        for sport_key in FEATURED_SPORTS:
-            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
-            params = {
-                "apiKey": ODDS_API_KEY,
-                "regions": "eu,us",
-                "markets": "h2h,totals",
-                "dateFormat": "iso"
-            }
+    async with httpx.AsyncClient() as client:
+        active_leagues, err = await fetch_active_soccer_sports(client, ODDS_API_KEY)
+        if err:
+            return {"status": err, "data": []}
 
-            try:
-                resp = await client.get(url, params=params)
-                if resp.status_code != 200:
-                    continue
+        leagues_to_query = active_leagues[:12]
 
-                matches = resp.json()
-                for match in matches:
-                    commence_time_str = match.get("commence_time")
-                    if not commence_time_str:
-                        continue
+        tasks = [fetch_odds_for_sport(client, league, ODDS_API_KEY) for league in leagues_to_query]
+        results = await asyncio.gather(*tasks)
 
-                    match_dt = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
+        for matches, err in results:
+            if err in ["INVALID_KEY", "QUOTA_EXCEEDED"]:
+                error_status = err
+                break
+            all_matches.extend(matches)
 
-                    if not (time_start <= match_dt <= time_end):
-                        continue
+    if error_status:
+        return {"status": error_status, "data": []}
 
-                    home_team = match.get("home_team", "Local")
-                    away_team = match.get("away_team", "Visitante")
-                    sport_title = match.get("sport_title", "Fútbol")
+    processed_picks = []
 
-                    bookmakers = match.get("bookmakers", [])
-                    if not bookmakers:
-                        continue
+    for match in all_matches:
+        commence_time_str = match.get("commence_time")
+        if not commence_time_str:
+            continue
+        try:
+            match_dt = datetime.fromisoformat(commence_time_str.replace("Z", "+00:00"))
+        except Exception:
+            continue
 
-                    bm = bookmakers[0]
-                    h2h_odds = {}
-                    totals_odds = {}
+        if not (time_start <= match_dt <= time_end):
+            continue
 
-                    for market in bm.get("markets", []):
-                        if market["key"] == "h2h":
-                            for outcome in market.get("outcomes", []):
-                                name = outcome.get("name")
-                                price = float(outcome.get("price", 0))
-                                if name == home_team:
-                                    h2h_odds["Victoria Local"] = price
-                                elif name == away_team:
-                                    h2h_odds["Victoria Visitante"] = price
-                                elif name.lower() == "draw":
-                                    h2h_odds["Empate"] = price
-                        elif market["key"] == "totals":
-                            for outcome in market.get("outcomes", []):
-                                name = outcome.get("name")
-                                point = outcome.get("point")
-                                price = float(outcome.get("price", 0))
-                                if point == 2.5:
-                                    if name == "Over":
-                                        totals_odds["Over 2.5 Goles"] = price
-                                    elif name == "Under":
-                                        totals_odds["Under 2.5 Goles"] = price
-                                elif point == 1.5 and name == "Over":
-                                    totals_odds["Over 1.5 Goles"] = price
+        home_team = match.get("home_team", "Local")
+        away_team = match.get("away_team", "Visitante")
+        sport_title = match.get("sport_title", "Fútbol")
+        bookmakers = match.get("bookmakers", [])
 
-                    # Estimación Poisson con ventaja de localía y calibración de expectativa
-                    odd_h = h2h_odds.get("Victoria Local", 2.20)
-                    odd_a = h2h_odds.get("Victoria Visitante", 3.20)
+        if not bookmakers:
+            continue
 
-                    rel_strength = odd_a / (odd_h + 0.01)
-                    base_total_exp = 2.60
+        h2h_odds = {}
+        over25_odds = None
+        under25_odds = None
+        bookmaker_title = "Mercado"
 
-                    if totals_odds.get("Over 2.5 Goles", 2.0) < 1.80:
-                        base_total_exp = 2.95
-                    elif totals_odds.get("Over 2.5 Goles", 2.0) > 2.15:
-                        base_total_exp = 2.25
+        for bm in bookmakers:
+            bookmaker_title = bm.get("title", bookmaker_title)
+            for m in bm.get("markets", []):
+                if m.get("key") == "h2h" and not h2h_odds:
+                    for outcome in m.get("outcomes", []):
+                        h2h_odds[outcome["name"]] = outcome["price"]
+                elif m.get("key") == "totals" and over25_odds is None:
+                    for outcome in m.get("outcomes", []):
+                        if outcome.get("point") == 2.5:
+                            if outcome.get("name") == "Over":
+                                over25_odds = outcome.get("price")
+                            elif outcome.get("name") == "Under":
+                                under25_odds = outcome.get("price")
 
-                    home_exp = max(0.7, round((base_total_exp / 2.0) * math.sqrt(rel_strength) * 1.12, 2))
-                    away_exp = max(0.5, round(base_total_exp - home_exp, 2))
+        home_odd = h2h_odds.get(home_team)
+        away_odd = h2h_odds.get(away_team)
+        draw_odd = h2h_odds.get("Draw")
 
-                    probs = calculate_poisson_matrix(home_exp, away_exp)
+        if home_odd and away_odd:
+            home_implied = 1.0 / home_odd
+            away_implied = 1.0 / away_odd
+            total_implied = home_implied + away_implied
+            home_exp = max(0.6, round((home_implied / total_implied) * 2.7, 2))
+            away_exp = max(0.5, round((away_implied / total_implied) * 2.3, 2))
+        else:
+            home_exp = 1.50
+            away_exp = 1.10
 
-                    match_dt_local = match_dt.astimezone(LOCAL_TZ)
-                    formatted_time = match_dt_local.strftime("%H:%M Hs")
+        probs = calculate_poisson_probabilities(home_exp, away_exp)
 
-                    # Compilar todos los mercados disponibles
-                    all_available_markets = {**h2h_odds, **totals_odds}
+        candidates = []
+        if home_odd:
+            ev = calculate_ev(home_odd, probs["Victoria Local"])
+            candidates.append({"market": f"Gana {home_team}", "odd": home_odd, "prob": probs["Victoria Local"], "ev": ev})
 
-                    for m_name, bookmaker_odd in all_available_markets.items():
-                        if bookmaker_odd <= 1.0 or m_name not in probs:
-                            continue
+        if away_odd:
+            ev = calculate_ev(away_odd, probs["Victoria Visitante"])
+            candidates.append({"market": f"Gana {away_team}", "odd": away_odd, "prob": probs["Victoria Visitante"], "ev": ev})
 
-                        estimated_prob = probs[m_name]
-                        fair_odd = round(100.0 / estimated_prob, 2) if estimated_prob > 0 else 99.0
-                        kelly = calculate_kelly_stake(estimated_prob, bookmaker_odd)
-                        ev = kelly.get("expected_value_pct", 0)
+        if draw_odd:
+            ev = calculate_ev(draw_odd, probs["Empate"])
+            candidates.append({"market": "Empate", "odd": draw_odd, "prob": probs["Empate"], "ev": ev})
 
-                        # Filtro flexible: si min_ev es 0 (menú normal), aceptamos EV >= -3% para mostrar opciones
-                        threshold = min_ev if min_ev > 0 else -3.0
+        if over25_odds:
+            ev = calculate_ev(over25_odds, probs["Over 2.5 Goles"])
+            candidates.append({"market": "Over 2.5 Goles", "odd": over25_odds, "prob": probs["Over 2.5 Goles"], "ev": ev})
 
-                        if ev >= threshold:
-                            results.append({
-                                "match": f"{home_team} vs {away_team}",
-                                "league": sport_title,
-                                "time": formatted_time,
-                                "market": m_name,
-                                "prob": estimated_prob,
-                                "fair_odd": fair_odd,
-                                "bookmaker_odd": bookmaker_odd,
-                                "ev": ev,
-                                "stake": kelly.get("recommended_stake_pct", 0)
-                            })
+        if under25_odds:
+            ev = calculate_ev(under25_odds, probs["Under 2.5 Goles"])
+            candidates.append({"market": "Under 2.5 Goles", "odd": under25_odds, "prob": probs["Under 2.5 Goles"], "ev": ev})
 
-            except Exception as e:
-                print(f"Error procesando {sport_key}: {e}")
-                continue
+        if not candidates:
+            continue
 
-    # Ordenar por EV descendente (las mejores apuestas al principio)
-    results.sort(key=lambda x: x["ev"], reverse=True)
-    return {"status": "SUCCESS", "data": results}
+        best_pick = max(candidates, key=lambda x: x["ev"])
 
+        if min_ev_filter > 0 and best_pick["ev"] < min_ev_filter:
+            continue
 
-async def get_best_parlays(hours: int = None, days_offset: int = None) -> dict:
-    single_res = await get_upcoming_ev_picks(hours=hours, days_offset=days_offset, min_ev=-1.0)
+        stake_info = calculate_kelly_stake(best_pick["odd"], best_pick["prob"])
+        match_time_local = match_dt.astimezone(LOCAL_TZ).strftime("%H:%M hs (%d/%m)")
 
-    if single_res["status"] == "NO_API_KEY":
-        return {"status": "NO_API_KEY", "parlay": None}
+        processed_picks.append({
+            "match": f"{home_team} vs {away_team}",
+            "home_team": home_team,
+            "away_team": away_team,
+            "league": sport_title,
+            "time": match_time_local,
+            "best_pick": best_pick["market"],
+            "odd": best_pick["odd"],
+            "prob": best_pick["prob"],
+            "ev": best_pick["ev"],
+            "stake_pct": stake_info["stake_pct"],
+            "stake_amount": stake_info["amount"],
+            "bookmaker": bookmaker_title,
+            "poisson": probs
+        })
 
-    picks = single_res.get("data", [])
-
-    if len(picks) < 2:
-        return {"status": "SUCCESS", "parlay": None}
-
-    unique_picks = []
-    seen_matches = set()
-    for p in sorted(picks, key=lambda x: x["ev"], reverse=True):
-        if p["match"] not in seen_matches:
-            seen_matches.add(p["match"])
-            unique_picks.append(p)
-        if len(unique_picks) == 4:
-            break
-
-    if len(unique_picks) < 2:
-        return {"status": "SUCCESS", "parlay": None}
-
-    total_odd = 1.0
-    total_prob = 1.0
-
-    for p in unique_picks:
-        total_odd *= p["bookmaker_odd"]
-        total_prob *= (p["prob"] / 100.0)
-
-    total_ev = ((total_prob * total_odd) - 1.0) * 100.0
-
-    b = total_odd
-    p = total_prob
-    raw_kelly = ((p * b - 1.0) / (b - 1.0)) * 100.0 if b > 1.0 else 0.0
-    conservative_stake = max(0.5, round(raw_kelly / 8.0, 2)) if total_ev > 0 else 0.5
-    recommended_stake = min(conservative_stake, 2.0)
-
-    parlay_data = {
-        "legs_count": len(unique_picks),
-        "legs": unique_picks,
-        "total_odd": round(total_odd, 2),
-        "total_prob_pct": round(total_prob * 100, 2),
-        "total_ev": round(total_ev, 2),
-        "recommended_stake_pct": recommended_stake
-    }
-
-    return {"status": "SUCCESS", "parlay": parlay_data}
+    processed_picks.sort(key=lambda x: x["ev"], reverse=True)
+    return {"status": "SUCCESS", "data": processed_picks}
