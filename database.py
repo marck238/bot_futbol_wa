@@ -1,21 +1,29 @@
 import os
+from urllib.parse import urlparse, urlunparse
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import BigInteger, String, DateTime, func
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Normalización automática para asyncpg (reemplaza prefijo y sslmode)
 if DATABASE_URL:
+    # 1. Asegurar el prefijo de driver asíncrono postgresql+asyncpg
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
     elif DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-    
-    # asyncpg requiere ssl=require en lugar de sslmode=require
-    DATABASE_URL = DATABASE_URL.replace("sslmode=require", "ssl=require")
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+    # 2. Remover los parámetros de la URL (?sslmode=..., ?channel_binding=...) que causan error en asyncpg
+    parsed = urlparse(DATABASE_URL)
+    DATABASE_URL = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, "", parsed.fragment))
+
+# 3. Pasar el parámetro SSL requerido por Neon a través de connect_args
+engine = create_async_engine(
+    DATABASE_URL,
+    connect_args={"ssl": "require"},
+    echo=False
+)
+
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 class Base(DeclarativeBase):
