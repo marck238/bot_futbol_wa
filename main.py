@@ -1,5 +1,4 @@
 ﻿import os
-from datetime import datetime, timedelta
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -11,12 +10,12 @@ from telegram.ext import (
 )
 from sqlalchemy import select
 from database import init_db, AsyncSessionLocal, User, Filter
-from analytics import analyze_pre_match_event, calculate_kelly_stake
+from analytics import calculate_kelly_stake
+from odds_api import get_upcoming_ev_picks
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
-# --- MENÚ PRINCIPAL CON BOTONES ---
 def get_main_menu_keyboard():
     keyboard = [
         [
@@ -53,7 +52,6 @@ async def get_or_create_user(telegram_id: int):
             await session.refresh(user)
         return user
 
-# Command /start -> Muestra el menú con botones
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     if ADMIN_ID and str(telegram_id) != str(ADMIN_ID):
@@ -61,106 +59,70 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await get_or_create_user(telegram_id)
-    
     welcome_text = (
         "⚽ **Panel de Pronósticos Pre-Partido**\n\n"
-        "Selecciona una opción del menú para escanear partidos en tiempo real "
-        "y encontrar apuestas con Valor Esperado Positivo (EV+):"
+        "Selecciona un rango de tiempo para escanear los partidos programados, "
+        "las cuotas reales y encontrar pronósticos con Valor Esperado Positivo (EV+):"
     )
-    
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode="Markdown",
-        reply_markup=get_main_menu_keyboard()
-    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
 
-# --- MANEJADOR DE CLICS EN BOTONES ---
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()  # Confirma la recepción del clic a Telegram
-    
+    await query.answer()
     data = query.data
 
-    # Respuestas según el botón presionado
     if data == "time_4h":
         await render_predictions(query, title="⏳ Partidos en las Próximas 4 Horas", hours=4)
-    
     elif data == "time_today":
         await render_predictions(query, title="📅 Pronósticos para Hoy", hours=24)
-        
     elif data == "time_tomorrow":
         await render_predictions(query, title="📆 Pronósticos para Mañana", days_offset=1)
-        
     elif data == "time_pasado_manana":
         await render_predictions(query, title="📆 Pronósticos para Pasado Mañana", days_offset=2)
-        
     elif data == "time_weekend":
         await render_predictions(query, title="⚽ Pronósticos para el Próximo Fin de Semana", is_weekend=True)
-        
     elif data == "top_today":
         await render_predictions(query, title="⭐ LAS MEJORES APUESTAS DE HOY (EV+ Máximo)", hours=24, min_ev_filter=5.0)
-
     elif data == "top_3days":
         await render_predictions(query, title="💎 TOP PICKS DE LOS PRÓXIMOS 3 DÍAS", hours=72, min_ev_filter=6.0)
-
     elif data == "menu_filters":
         await show_user_filters(query)
-
     elif data == "calc_kelly":
         msg = (
             "📊 **Calculadora de Criterio de Kelly**\n\n"
-            "Para usar la calculadora directamente envía:\n"
+            "Para usar la calculadora envía:\n"
             "`/kelly <probabilidad_%> <cuota_casa> [tu_banca]`\n\n"
             "Ejemplo:\n`/kelly 65 1.90 1000`"
         )
         back_button = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú", callback_data="main_menu")]])
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_button)
-
     elif data == "main_menu":
         welcome_text = "⚽ **Panel de Pronósticos Pre-Partido**\n\nSelecciona una opción:"
         await query.edit_message_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
 
-# --- GENERADOR DE PRONÓSTICOS FORMATEADOS ---
 async def render_predictions(query, title: str, hours: int = None, days_offset: int = None, is_weekend: bool = False, min_ev_filter: float = 0.0):
-    # Botón para regresar siempre al menú
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="main_menu")]])
-    
-    # Texto de cabecera
+    await query.edit_message_text(f"🔍 *Escaneando eventos y cuotas reales para {title}...*", parse_mode="Markdown")
+
+    api_res = await get_upcoming_ev_picks(hours=hours, days_offset=days_offset, is_weekend=is_weekend, min_ev=min_ev_filter)
+
+    if api_res["status"] == "NO_API_KEY":
+        msg = (
+            f"📊 **{title}**\n\n"
+            "⚠️ **API Key no detectada**\n"
+            "Para recibir pronósticos con cuotas reales en tiempo real, agrega la variable `ODDS_API_KEY` en Render.\n\n"
+            "📌 *Consíguela gratis en [the-odds-api.com](https://the-odds-api.com)*"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
+        return
+
+    picks = api_res["data"]
     response = f"📊 **{title}**\n\n"
-    
-    # Mock / Estructura visual de los picks procesados
-    # Cuando conectemos la API de partidos, esta función filtrará los datos reales
-    sample_picks = [
-        {
-            "match": "Real Madrid vs Valencia",
-            "league": "🇪🇸 LaLiga",
-            "time": "18:00 Hs",
-            "market": "Over 2.5 Goles",
-            "prob": 68.5,
-            "fair_odd": 1.46,
-            "bookmaker_odd": 1.85,
-            "ev": 26.7,
-            "stake": 6.6
-        },
-        {
-            "match": "Arsenal vs Chelsea",
-            "league": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
-            "time": "20:30 Hs",
-            "market": "Ambos Anotan (BTTS)",
-            "prob": 62.0,
-            "fair_odd": 1.61,
-            "bookmaker_odd": 1.90,
-            "ev": 17.8,
-            "stake": 4.9
-        }
-    ]
 
-    filtered_picks = [p for p in sample_picks if p["ev"] >= min_ev_filter]
-
-    if not filtered_picks:
-        response += "⚠️ No se encontraron partidos con Valor Esperado suficiente para este rango horario."
+    if not picks:
+        response += "⚠️ No se encontraron partidos con Valor Esperado positivo (EV+) para este rango de tiempo."
     else:
-        for idx, item in enumerate(filtered_picks, start=1):
+        for idx, item in enumerate(picks, start=1):
             response += (
                 f"**{idx}. {item['match']}** ({item['league']})\n"
                 f"⏰ Hora: `{item['time']}`\n"
@@ -174,15 +136,13 @@ async def render_predictions(query, title: str, hours: int = None, days_offset: 
 
     await query.edit_message_text(response, parse_mode="Markdown", reply_markup=back_keyboard)
 
-# --- VER FILTROS GUARDADOS ---
 async def show_user_filters(query):
     telegram_id = query.from_user.id
     async with AsyncSessionLocal() as session:
         res_user = await session.execute(select(User).where(User.telegram_id == telegram_id))
         user = res_user.scalar_one_or_none()
-        
         back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver al Menú", callback_data="main_menu")]])
-        
+
         if not user:
             await query.edit_message_text("❌ Usuario no registrado.", reply_markup=back_keyboard)
             return
@@ -194,7 +154,7 @@ async def show_user_filters(query):
             msg = (
                 "⚙️ **Mis Filtros Guardados**\n\n"
                 "No tienes filtros configurados.\n"
-                "Para añadir uno envía el comando:\n"
+                "Para añadir uno envía:\n"
                 "`/crear_filtro <nombre> <mercado> <min_prob_%> <min_cuota> <min_ev_%>`\n\n"
                 "Ejemplo:\n`/crear_filtro MisGoles OVER_2.5 60 1.75 4`"
             )
@@ -210,7 +170,6 @@ async def show_user_filters(query):
             )
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=back_keyboard)
 
-# Command /kelly para cálculo manual rápido
 async def kelly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("Uso: `/kelly <probabilidad_%> <cuota> [banca]`\nEjemplo: `/kelly 62 1.90 1000`", parse_mode="Markdown")
@@ -236,7 +195,6 @@ async def kelly_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Ingresa valores numéricos válidos.")
 
-# App Builder
 telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(CommandHandler("kelly", kelly_command))
@@ -249,7 +207,7 @@ async def lifespan(app: FastAPI):
     await telegram_app.initialize()
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=True)
-    print(">>> Bot con Menú de Botones iniciado correctamente <<<")
+    print(">>> Bot con API de partidos reales en tiempo real listo <<<")
     yield
     await telegram_app.updater.stop()
     await telegram_app.stop()
