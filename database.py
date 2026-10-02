@@ -1,23 +1,20 @@
 import os
 from urllib.parse import urlparse, urlunparse
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import BigInteger, String, DateTime, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, String, DateTime, Float, Integer, Boolean, ForeignKey, func
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
-    # 1. Asegurar el prefijo de driver asíncrono postgresql+asyncpg
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
     elif DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-    # 2. Remover los parámetros de la URL (?sslmode=..., ?channel_binding=...) que causan error en asyncpg
     parsed = urlparse(DATABASE_URL)
     DATABASE_URL = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, "", parsed.fragment))
 
-# 3. Pasar el parámetro SSL requerido por Neon a través de connect_args
 engine = create_async_engine(
     DATABASE_URL,
     connect_args={"ssl": "require"},
@@ -38,7 +35,24 @@ class User(Base):
     status: Mapped[str] = mapped_column(String, default="ACTIVE")
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    filters: Mapped[list["Filter"]] = relationship("Filter", back_populates="user", cascade="all, delete-orphan")
+
+class Filter(Base):
+    __tablename__ = "filters"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    market: Mapped[str] = mapped_column(String(50), default="CORNERS")  # CORNERS, GOALS, CARDS
+    min_appm: Mapped[float] = mapped_column(Float, default=1.0)  # Ataques Peligrosos Por Minuto
+    min_corners: Mapped[int] = mapped_column(Integer, default=0)
+    min_odd: Mapped[float] = mapped_column(Float, default=1.80)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped["User"] = relationship("User", back_populates="filters")
+
 async def init_db():
-    """Crea las tablas en Neon si no existen."""
+    """Crea o actualiza las tablas en Neon."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
