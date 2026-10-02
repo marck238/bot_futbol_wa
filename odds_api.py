@@ -128,3 +128,60 @@ async def get_upcoming_ev_picks(
                 continue
 
     return {"status": "SUCCESS", "data": results}
+async def get_best_parlays(hours: int = None, days_offset: int = None) -> dict:
+    """
+    Genera la mejor combinada (de 2 a 4 selecciones máximo) armando una lista 
+    con los eventos de mayor EV+ individual y calculando la cuota y probabilidad conjunta.
+    """
+    # Se extraen las mejores selecciones individuales con EV+
+    single_res = await get_upcoming_ev_picks(hours=hours, days_offset=days_offset, min_ev=2.0)
+
+    if single_res["status"] == "NO_API_KEY":
+        return {"status": "NO_API_KEY", "parlay": None}
+
+    picks = single_res.get("data", [])
+
+    if len(picks) < 2:
+        return {"status": "SUCCESS", "parlay": None}
+
+    # Ordenar por EV descendente y seleccionar máximo 4 eventos sin repetir partidos
+    unique_picks = []
+    seen_matches = set()
+    for p in sorted(picks, key=lambda x: x["ev"], reverse=True):
+        if p["match"] not in seen_matches:
+            seen_matches.add(p["match"])
+            unique_picks.append(p)
+        if len(unique_picks) == 4:
+            break
+
+    if len(unique_picks) < 2:
+        return {"status": "SUCCESS", "parlay": None}
+
+    total_odd = 1.0
+    total_prob = 1.0
+
+    for p in unique_picks:
+        total_odd *= p["bookmaker_odd"]
+        total_prob *= (p["prob"] / 100.0)
+
+    total_ev = ((total_prob * total_odd) - 1.0) * 100.0
+
+    # Gestión de banca para combinadas:
+    # Debido a la mayor varianza de las combinadas, se aplica un Kelly Fraccionado más conservador (1/8 Kelly)
+    # limitando la recomendación a un máximo del 1.5% o 2.0% de banca.
+    b = total_odd
+    p = total_prob
+    raw_kelly = ((p * b - 1.0) / (b - 1.0)) * 100.0 if b > 1.0 else 0.0
+    conservative_stake = max(0.5, round(raw_kelly / 8.0, 2)) if total_ev > 0 else 0.5
+    recommended_stake = min(conservative_stake, 2.0)
+
+    parlay_data = {
+        "legs_count": len(unique_picks),
+        "legs": unique_picks,
+        "total_odd": round(total_odd, 2),
+        "total_prob_pct": round(total_prob * 100, 2),
+        "total_ev": round(total_ev, 2),
+        "recommended_stake_pct": recommended_stake
+    }
+
+    return {"status": "SUCCESS", "parlay": parlay_data}
