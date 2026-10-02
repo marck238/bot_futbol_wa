@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
     
     await telegram_app.initialize()
     await telegram_app.start()
-    await telegram_app.updater.start_polling()
+    await telegram_app.updater.start_polling(drop_pending_updates=True)
     print(">>> Bot de Telegram iniciado en Render <<<")
     
     yield
