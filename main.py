@@ -1221,7 +1221,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif category_code == "catcombo":
         if len(target_fixtures) < 2:
-            response = f"ℹ️️ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
+            response = f"ℹ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
             await query.message.reply_text(response, parse_mode="Markdown")
         else:
             f1, f2 = target_fixtures[0], target_fixtures[1]
