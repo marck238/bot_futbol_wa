@@ -6,7 +6,7 @@ import threading
 import asyncio
 import time
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import httpx
 from telegram import (
@@ -24,6 +24,13 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+
+# ---------------------------------------------------------
+# Configuración
+# ---------------------------------------------------------
+# Cambia esta zona horaria si necesitas otra (ej: "America/Argentina/Buenos_Aires")
+LOCAL_TIMEZONE_NAME = "America/Montevideo" 
+UTC_OFFSET_HOURS = -3
 
 # ---------------------------------------------------------
 # 1. Configuración de Logging
@@ -58,22 +65,35 @@ def start_health_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 3. Conversor de Horario Universal (UTC) a Hora Local
+# 3. Conversor de Horario Infalible (Timestamp / ISO)
 # ---------------------------------------------------------
-def format_match_time(iso_date_str: str, utc_offset_hours: int = -3) -> str:
+def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> str:
     """
-    Convierte la fecha ISO en UTC entregada por la API a la hora local.
-    Por defecto utc_offset_hours=-3 ajusta a GMT-3 (Uruguay / Argentina).
+    Obtiene la hora exacta local (HH:MM) utilizando el Timestamp Unix
+    de la API o extrayendo la hora local enviada.
     """
-    if not iso_date_str:
-        return "--:--"
-    try:
-        clean_str = iso_date_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(clean_str)
-        local_dt = dt + timedelta(hours=utc_offset_hours)
-        return local_dt.strftime("%H:%M")
-    except Exception:
-        return iso_date_str[11:16] if len(iso_date_str) >= 16 else "--:--"
+    fixture_data = fix.get("fixture", {})
+    
+    # Método 1: Usar Timestamp Unix (100% exacto)
+    ts = fixture_data.get("timestamp")
+    if ts:
+        try:
+            tz = timezone(timedelta(hours=utc_offset_hours))
+            dt = datetime.fromtimestamp(ts, tz=tz)
+            return dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+    # Método 2: Fallback por texto ISO
+    iso_date_str = fixture_data.get("date", "")
+    if iso_date_str and "T" in iso_date_str:
+        try:
+            time_part = iso_date_str.split("T")[1]
+            return time_part[:5]
+        except Exception:
+            pass
+
+    return "--:--"
 
 # ---------------------------------------------------------
 # 4. Modelos Matemáticos (Poisson & Kelly)
@@ -131,18 +151,15 @@ def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_frac
 
     return round(f_star * bankroll_fraction * 100, 2)
 
-# Generador de Métricas Dinámicas por Partido
 def generate_fixture_analytics(fix: dict):
     fix_id = fix.get("fixture", {}).get("id", 0)
     seed = int(hashlib.md5(str(fix_id).encode()).hexdigest(), 16)
 
-    # Goles esperados únicos según ID del encuentro
     home_exp = round(1.10 + ((seed % 100) / 70.0), 2)
     away_exp = round(0.75 + (((seed // 100) % 100) / 80.0), 2)
 
     metrics = calculate_match_metrics(home_exp, away_exp)
 
-    # Cuotas y proyecciones dinámicas
     p_home = max(metrics["p_home"], 0.15)
     base_odds = 1.0 / p_home
     odds_home = round(base_odds * (0.92 + ((seed % 35) / 100.0)), 2)
@@ -168,10 +185,10 @@ def generate_fixture_analytics(fix: dict):
     }
 
 # ---------------------------------------------------------
-# 5. Integración API con Caché por Fecha
+# 5. Integración API con Zona Horaria y Caché
 # ---------------------------------------------------------
 _cached_fixtures = {}
-CACHE_TTL_SECONDS = 900  # 15 Minutos de caché por fecha
+CACHE_TTL_SECONDS = 900  # 15 Minutos
 
 def get_target_date_str(offset_days: int) -> tuple[str, str]:
     target_dt = datetime.now() + timedelta(days=offset_days)
@@ -201,12 +218,13 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
             logger.info(f"Devolviendo caché para la fecha {date_str}.")
             return cache_entry["data"], "OK"
 
-    url = f"https://v3.football.api-sports.io/fixtures?date={date_str}"
+    # Se solicita la zona horaria directamente en la consulta HTTP
+    url = f"https://v3.football.api-sports.io/fixtures?date={date_str}&timezone={LOCAL_TIMEZONE_NAME}"
     headers = {"x-apisports-key": api_key}
 
     rapid_key = os.getenv("RAPIDAPI_KEY")
     if rapid_key:
-        url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date_str}"
+        url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date_str}&timezone={LOCAL_TIMEZONE_NAME}"
         headers = {
             "x-rapidapi-key": rapid_key,
             "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
@@ -291,7 +309,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚠ *Límite de la API alcanzado.*", parse_mode="Markdown")
         return
     elif not fixtures:
-        await query.edit_message_text(f"ℹ️️ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
+        await query.edit_message_text(f"ℹ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
         return
 
     if category_code == "cat1x2":
@@ -301,8 +319,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
             
-            # Formato de hora ajustado a GMT-3
-            match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
+            match_time = format_match_time(fix)
 
             analytics = generate_fixture_analytics(fix)
             p_home = analytics["metrics"]["p_home"]
@@ -327,8 +344,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
             
-            # Formato de hora ajustado a GMT-3
-            match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
+            match_time = format_match_time(fix)
 
             analytics = generate_fixture_analytics(fix)
             p_over = analytics["metrics"]["p_over_25"]
@@ -352,8 +368,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
             
-            # Formato de hora ajustado a GMT-3
-            match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
+            match_time = format_match_time(fix)
 
             analytics = generate_fixture_analytics(fix)
 
@@ -419,8 +434,7 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         home = teams.get("home", {}).get("name")
         away = teams.get("away", {}).get("name")
         
-        # Formato de hora ajustado a GMT-3
-        match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
+        match_time = format_match_time(fix)
 
         analytics = generate_fixture_analytics(fix)
         p_home = analytics["metrics"]["p_home"]
