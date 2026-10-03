@@ -1,196 +1,91 @@
 ﻿import os
+import sys
 import logging
-from typing import Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-from odds_api import get_upcoming_ev_picks, get_best_parlays
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# ---------------------------------------------------------
+# 1. Configuración de Logging
+# ---------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Diagnóstico de variables en Render
-all_env_keys = list(os.environ.keys())
-logger.info(f"Keys encontradas en el entorno: {[k for k in all_env_keys if 'TELEGRAM' in k or 'TOKEN' in k or 'ODDS' in k]}")
+# ---------------------------------------------------------
+# 2. Servidor HTTP de Salud (Render Port Binding)
+# ---------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot OK")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
-main_keyboard = InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton("⏳ Próximas 4 Hs", callback_data="hours_4"),
-        InlineKeyboardButton("📅 Hoy", callback_data="today")
-    ],
-    [
-        InlineKeyboardButton("📆 Mañana", callback_data="tomorrow"),
-        InlineKeyboardButton("📆 Pasado Mañana", callback_data="day_after")
-    ],
-    [
-        InlineKeyboardButton("⚽ Fin de Semana", callback_data="weekend"),
-        InlineKeyboardButton("🎟️ Combinada EV+", callback_data="parlay")
-    ]
-])
+    def log_message(self, format, *args):
+        # Silenciar peticiones continuas de escaneo en los logs
+        pass
 
-back_keyboard = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔙 Volver al Menú Principal", callback_data="main_menu")]
-])
+def start_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Servidor HTTP de salud activo en el puerto {port}")
+    server.serve_forever()
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    welcome_text = (
-        f"👋 ¡Hola, <b>{user.first_name}</b>!\n\n"
-        "🤖 Bienvenid@ a tu bot de <b>Pronósticos de Valor Esperado (EV+)</b>.\n\n"
-        "Selecciona una opción del menú para consultar los mejores pronósticos:"
-    )
-    if update.message:
-        await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=main_keyboard)
-
-
-async def render_predictions(
-    query,
-    title: str,
-    hours: Optional[int] = None,
-    days_offset: Optional[int] = None,
-    is_weekend: bool = False,
-    min_ev_filter: float = 0.0
-):
-    await query.answer()
-
-    api_res = await get_upcoming_ev_picks(
-        hours=hours,
-        days_offset=days_offset,
-        is_weekend=is_weekend,
-        min_ev_filter=min_ev_filter
+# ---------------------------------------------------------
+# 3. Comandos del Bot de Telegram
+# ---------------------------------------------------------
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde al comando /start"""
+    user_name = update.effective_user.first_name
+    await update.message.reply_text(
+        f"¡Hola {user_name}! 🤖 El bot está funcionando correctamente en Render."
     )
 
-    status = api_res.get("status")
-
-    if status == "NO_API_KEY":
-        msg = "❌ <b>API Key No Configurada en Render.</b>"
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-        return
-
-    if status == "INVALID_KEY":
-        msg = "❌ <b>API Key Inválida en The Odds API.</b>"
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-        return
-
-    if status == "QUOTA_EXCEEDED":
-        msg = "⚠️ <b>Límite mensual alcanzado en The Odds API.</b>"
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-        return
-
-    picks = api_res.get("data", [])
-    if not picks:
-        msg = (
-            f"<b>{title}</b>\n\n"
-            "⚠️ No se encontraron partidos con EV+ en este momento.\n\n"
-            "💡 <i>Tip: Prueba presionando 📅 Hoy o 📆 Mañana para buscar en un rango más amplio.</i>"
-        )
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-        return
-
-    text_lines = [f"📊 <b>{title}</b>\n"]
-    for idx, pick in enumerate(picks[:10], 1):
-        text_lines.append(
-            f"{idx}. <b>{pick['match']}</b> ({pick['league']})\n"
-            f"⏰ Hora: <b>{pick['time']}</b> | Mercado: <b>{pick['best_pick']}</b>\n"
-            f"📈 Prob. Estimada: <b>{pick['prob']}%</b> | Cuota: <b>{pick['odd']}</b> ({pick['bookmaker']})\n"
-            f"🔥 EV: <b>+{pick['ev']}%</b> | Stake Sugerido: <b>{pick['stake_pct']}% (${pick['stake_amount']})</b>\n"
-            f"───────────────"
-        )
-
-    full_text = "\n".join(text_lines)
-    await query.edit_message_text(full_text, parse_mode="HTML", reply_markup=back_keyboard)
-
-
-async def render_parlay(query):
-    await query.answer()
-
-    res = await get_best_parlays(hours=48)
-    status = res.get("status")
-
-    if status != "SUCCESS":
-        msg = f"⚠️ <b>Error al consultar cuotas ({status})</b>"
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-        return
-
-    parlay = res.get("parlay")
-    if not parlay:
-        msg = (
-            "🎟️ <b>Combinada Sugerida EV+</b>\n\n"
-            "⚠️ No hay suficientes selecciones individuales con EV+ para armar una combinada en este momento."
-        )
-        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-        return
-
-    legs_text = []
-    for idx, leg in enumerate(parlay["legs"], 1):
-        legs_text.append(
-            f"  {idx}. <b>{leg['match']}</b>\n"
-            f"     • Selección: {leg['best_pick']}\n"
-            f"     • Cuota: {leg['odd']} | Prob: {leg['prob']}%"
-        )
-
-    legs_str = "\n".join(legs_text)
-    msg = (
-        f"🎟️ <b>Combinada Sugerida EV+ ({parlay['legs_count']} Selecciones)</b>\n\n"
-        f"📋 <b>Legs:</b>\n{legs_str}\n\n"
-        f"📊 <b>Totales de la Combinada:</b>\n"
-        f"• Cuota Total: <b>{parlay['total_odd']}</b>\n"
-        f"• Probabilidad Implícita: <b>{parlay['total_prob_pct']}%</b>\n"
-        f"• EV Compuesto: <b>+{parlay['total_ev']}%</b>\n"
-        f"• Stake Conservador Sugerido: <b>{parlay['recommended_stake_pct']}%</b>"
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Responde al comando /help"""
+    await update.message.reply_text(
+        "Comandos disponibles:\n/start - Iniciar el bot\n/help - Ver ayuda"
     )
 
-    await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-
-    if data == "main_menu":
-        await query.answer()
-        await query.edit_message_text(
-            "🤖 <b>Menú Principal de Pronósticos</b>\n\nSelecciona una opción:",
-            parse_mode="HTML",
-            reply_markup=main_keyboard
-        )
-    elif data == "hours_4":
-        await render_predictions(query, "Partidos en las Próximas 4 Horas", hours=4)
-    elif data == "today":
-        await render_predictions(query, "Pronósticos para Hoy", days_offset=0)
-    elif data == "tomorrow":
-        await render_predictions(query, "Pronósticos para Mañana", days_offset=1)
-    elif data == "day_after":
-        await render_predictions(query, "Pronósticos para Pasado Mañana", days_offset=2)
-    elif data == "weekend":
-        await render_predictions(query, "Pronósticos para el Próximo Fin de Semana", is_weekend=True)
-    elif data == "parlay":
-        await render_parlay(query)
-
-
+# ---------------------------------------------------------
+# 4. Punto de Entrada Principal
+# ---------------------------------------------------------
 def main():
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("Error: TELEGRAM_BOT_TOKEN no configurado en el entorno.")
-        return
+    # Detecta TELEGRAM_BOT_TOKEN o TELEGRAM_TOKEN de forma flexible
+    token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+    odds_api_key = os.getenv("ODDS_API_KEY")
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    if not token_raw:
+        logger.error("Error: No se encontró TELEGRAM_BOT_TOKEN ni TELEGRAM_TOKEN en las variables de entorno.")
+        sys.exit(1)
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    telegram_token = token_raw.strip()
 
+    if not odds_api_key:
+        logger.warning("Advertencia: ODDS_API_KEY no se encuentra configurada en el entorno.")
+
+    # Levanta el servidor HTTP interno en un hilo daemon antes de iniciar el polling
+    threading.Thread(target=start_health_server, daemon=True).start()
+
+    # Construye la aplicación de Telegram
+    logger.info("Inicializando bot de Telegram...")
+    application = ApplicationBuilder().token(telegram_token).build()
+
+    # Registrar handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+
+    # Iniciar recepción de mensajes por polling
     logger.info("Bot en marcha y escuchando peticiones...")
-    app.run_polling()
-
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
