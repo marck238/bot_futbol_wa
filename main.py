@@ -44,13 +44,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. Funciones Auxiliares de Limpieza
+# 2. Funciones Auxiliares de Limpieza y Parseo
 # ---------------------------------------------------------
 def clean_phone(phone_str: str) -> str:
-    """Extrae únicamente los dígitos de una cadena de teléfono."""
+    """Extrae únicamente los dígitos de una cadena."""
     if not phone_str:
         return ""
     return re.sub(r'\D', '', phone_str)
+
+def parse_identifier_type(identifier: str):
+    """
+    Determina si la entrada es Email, Teléfono o Telegram ID de forma precisa.
+    """
+    s = identifier.strip()
+    if "@" in s:
+        return "email", s.lower()
+    elif s.startswith("+"):
+        return "phone", clean_phone(s)
+    elif s.isdigit():
+        return "telegram_id", int(s)
+    else:
+        cleaned = clean_phone(s)
+        if cleaned:
+            return "phone", cleaned
+        return "unknown", s
 
 # ---------------------------------------------------------
 # 3. Base de Datos SQLite (Usuarios, Permisos y Estadísticas)
@@ -77,7 +94,6 @@ def init_db():
         )
     ''')
     
-    # Auto-migración para agregar columnas email/phone si la BD ya existía
     cursor.execute("PRAGMA table_info(users)")
     columns = [col[1] for col in cursor.fetchall()]
     if "email" not in columns:
@@ -120,42 +136,38 @@ def get_user_by_phone(phone_str: str):
     rows = cursor.fetchall()
     conn.close()
     for r in rows:
-        if clean_phone(r['phone']) == target or (len(target) >= 8 and target in clean_phone(r['phone'])):
+        cleaned_r = clean_phone(r['phone'])
+        if cleaned_r == target or (len(target) >= 8 and target in cleaned_r):
             return dict(r)
     return None
 
 def add_or_update_user_permission(identifier: str, is_active: int = 1, role: str = 'user'):
-    """Agrega o habilita un usuario mediante Email, Teléfono o Telegram ID."""
+    """Agrega o habilita un usuario según Email, Teléfono o Telegram ID."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    id_type, val = parse_identifier_type(identifier)
 
-    # Caso 1: Correo Electrónico
-    if "@" in identifier:
-        email_clean = identifier.strip().lower()
+    if id_type == "email":
         cursor.execute('''
             INSERT INTO users (email, role, is_active, created_at)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(email) DO UPDATE SET is_active = excluded.is_active
-        ''', (email_clean, role, is_active, created_at))
+        ''', (val, role, is_active, created_at))
 
-    # Caso 2: Número de Teléfono (con signo + o más de 7 dígitos)
-    elif identifier.startswith("+") or (len(clean_phone(identifier)) >= 8 and not identifier.isdigit() or len(identifier) >= 10):
-        phone_clean = clean_phone(identifier)
+    elif id_type == "phone":
         cursor.execute('''
             INSERT INTO users (phone, role, is_active, created_at)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(phone) DO UPDATE SET is_active = excluded.is_active
-        ''', (phone_clean, role, is_active, created_at))
+        ''', (val, role, is_active, created_at))
 
-    # Caso 3: Telegram ID
-    elif identifier.isdigit():
-        tg_id = int(identifier)
+    elif id_type == "telegram_id":
         cursor.execute('''
             INSERT INTO users (telegram_id, role, is_active, created_at)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET is_active = excluded.is_active
-        ''', (tg_id, role, is_active, created_at))
+        ''', (val, role, is_active, created_at))
 
     conn.commit()
     conn.close()
@@ -174,17 +186,17 @@ def link_telegram_id_to_user(user_db_id: int, telegram_id: int, username: str, f
 def modify_user_status_by_identifier(identifier: str, is_active: int):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    id_type, val = parse_identifier_type(identifier)
     rows = 0
 
-    if "@" in identifier:
-        cursor.execute("UPDATE users SET is_active = ? WHERE LOWER(email) = ?", (is_active, identifier.strip().lower()))
+    if id_type == "email":
+        cursor.execute("UPDATE users SET is_active = ? WHERE LOWER(email) = ?", (is_active, val))
         rows = cursor.rowcount
-    elif identifier.isdigit() and len(identifier) < 11:
-        cursor.execute("UPDATE users SET is_active = ? WHERE telegram_id = ?", (is_active, int(identifier)))
+    elif id_type == "phone":
+        cursor.execute("UPDATE users SET is_active = ? WHERE phone LIKE ?", (is_active, f"%{val}%"))
         rows = cursor.rowcount
-    else:
-        phone_clean = clean_phone(identifier)
-        cursor.execute("UPDATE users SET is_active = ? WHERE phone LIKE ?", (is_active, f"%{phone_clean}%"))
+    elif id_type == "telegram_id":
+        cursor.execute("UPDATE users SET is_active = ? WHERE telegram_id = ?", (is_active, val))
         rows = cursor.rowcount
 
     conn.commit()
@@ -194,17 +206,17 @@ def modify_user_status_by_identifier(identifier: str, is_active: int):
 def delete_user_by_identifier(identifier: str):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    id_type, val = parse_identifier_type(identifier)
     rows = 0
 
-    if "@" in identifier:
-        cursor.execute("DELETE FROM users WHERE LOWER(email) = ?", (identifier.strip().lower(),))
+    if id_type == "email":
+        cursor.execute("DELETE FROM users WHERE LOWER(email) = ?", (val,))
         rows = cursor.rowcount
-    elif identifier.isdigit() and len(identifier) < 11:
-        cursor.execute("DELETE FROM users WHERE telegram_id = ?", (int(identifier),))
+    elif id_type == "phone":
+        cursor.execute("DELETE FROM users WHERE phone LIKE ?", (f"%{val}%",))
         rows = cursor.rowcount
-    else:
-        phone_clean = clean_phone(identifier)
-        cursor.execute("DELETE FROM users WHERE phone LIKE ?", (f"%{phone_clean}%",))
+    elif id_type == "telegram_id":
+        cursor.execute("DELETE FROM users WHERE telegram_id = ?", (val,))
         rows = cursor.rowcount
 
     conn.commit()
@@ -288,7 +300,7 @@ def start_health_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 5. Control de Acceso y Pantalla de Verificación
+# 5. Control de Acceso e Inserción Directa
 # ---------------------------------------------------------
 def get_verification_reply_keyboard():
     keyboard = [
@@ -305,16 +317,21 @@ async def check_access(update: Update) -> bool:
     username = user.username or ""
     first_name = user.first_name or ""
 
-    # Administrador siempre tiene paso libre
+    # Administrador: se asegura de que exista en la BD con rol 'admin'
     if is_admin(user_id):
-        db_u = get_user_by_telegram_id(user_id)
-        if not db_u:
-            add_or_update_user_permission(str(user_id), is_active=1, role='admin')
-            db_u = get_user_by_telegram_id(user_id)
-            link_telegram_id_to_user(db_u['id'], user_id, username, first_name)
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute('''
+            INSERT INTO users (telegram_id, username, first_name, role, is_active, created_at)
+            VALUES (?, ?, ?, 'admin', 1, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET role='admin', is_active=1, username=excluded.username, first_name=excluded.first_name
+        ''', (user_id, username, first_name, created_at))
+        conn.commit()
+        conn.close()
         return True
 
-    # Verificar por Telegram ID vinculado
+    # Usuario Estándar: verificar por Telegram ID
     db_user = get_user_by_telegram_id(user_id)
     if db_user and db_user.get("is_active") == 1:
         return True
@@ -331,7 +348,7 @@ async def check_access(update: Update) -> bool:
             await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
         return False
 
-    # Si no está verificado, mostrar menú de verificación
+    # Solicitud de Verificación para no registrados
     verify_msg = (
         "⛔ *ACCESO RESTRINGIDO / VERIFICACIÓN DE CUENTA*\n\n"
         "Para ingresar a **NosticProno**, tu cuenta debe estar pre-aprobada por el administrador.\n\n"
@@ -569,7 +586,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/bloquear <email|teléfono|ID>` - Deshabilitar usuario\n"
         "• `/activar <email|teléfono|ID>` - Reactivar usuario\n"
         "• `/eliminar <email|teléfono|ID>` - Borrar usuario\n\n"
-        "💡 *Ejemplos:* `/agregar cliente@gmail.com` o `/agregar +59899123456`"
+        "💡 *Ejemplo:* `/agregar cliente@gmail.com` o `/agregar 123456789`"
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -614,7 +631,7 @@ async def agregar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update) or not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("⚠ Uso: `/agregar <EMAIL | TELÉFONO | TELEGRAM_ID>`\n\nEjemplo: `/agregar cliente@gmail.com`", parse_mode="Markdown")
+        await update.message.reply_text("⚠ Uso: `/agregar <EMAIL | TELÉFONO | TELEGRAM_ID>`", parse_mode="Markdown")
         return
 
     identifier = " ".join(context.args).strip()
@@ -942,7 +959,7 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     user = update.effective_user
 
-    # Intento de verificación por correo si el usuario envía un mail
+    # Verificación si el usuario ingresa su correo electrónico
     if "@" in text and "." in text and not get_user_by_telegram_id(user.id):
         matched_user = get_user_by_email(text)
         if matched_user and matched_user.get("is_active") == 1:
@@ -1077,19 +1094,16 @@ def main():
     init_db()
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot con verificación dual por Email/Teléfono...")
+    logger.info("Inicializando NosticProno Bot...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
-    # Handlers para Verificación de Contacto y Comandos
     application.add_handler(MessageHandler(filters.CONTACT, contact_verification_handler))
     
-    # Comandos Usuario / General
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", top_value_command))
     application.add_handler(CommandHandler("stats", user_stats_command))
 
-    # Comandos Administrador
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("usuarios", usuarios_command))
     application.add_handler(CommandHandler("agregar", agregar_command))
@@ -1097,7 +1111,6 @@ def main():
     application.add_handler(CommandHandler("activar", activar_command))
     application.add_handler(CommandHandler("eliminar", eliminar_command))
 
-    # Callbacks & Mensajes de Texto
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(adm_|stat_)"))
     application.add_handler(CallbackQueryHandler(date_callback_handler, pattern="^cat"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
