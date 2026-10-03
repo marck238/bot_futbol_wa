@@ -377,16 +377,22 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 # ---------------------------------------------------------
+
 # 9. Handlers de Comandos Básicos
 # ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     welcome_text = (
-        f"👋 ¡Hola, *{user_name}*!\n\n"
+        f"👋 *¡Hola, {user_name}!*\n\n"
         f"Bienvenido a *NosticProno* 🎯\n"
-        f"Selecciona un mercado y luego la fecha deseada (Hoy, Mañana o Pasado Mañana):"
+        f"Análisis estadístico y valor (+EV) para *Hoy, Mañana y Pasado Mañana*.\n\n"
+        f"👇 *Selecciona un mercado para empezar:*"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode="Markdown",
+        reply_markup=get_main_reply_keyboard()
+    )
 
 # ---------------------------------------------------------
 # 10. Ejecución Principal
