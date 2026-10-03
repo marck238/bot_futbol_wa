@@ -101,6 +101,12 @@ def init_db():
                 profit_units DOUBLE PRECISION DEFAULT 0.0
             )
         ''')
+        # Eliminar restricción NOT NULL en la columna status si existe en la tabla users
+        try:
+            cursor.execute("ALTER TABLE users ALTER COLUMN status DROP NOT NULL;")
+        except Exception:
+            conn.rollback()
+
         # Migración automática segura para columnas faltantes en tablas preexistentes
         columns_to_add = [
             ("username", "VARCHAR(255)"),
