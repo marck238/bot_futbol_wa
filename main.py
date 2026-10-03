@@ -7,6 +7,7 @@ import asyncio
 import time
 import hashlib
 import sqlite3
+import re
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import httpx
@@ -43,15 +44,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. Base de Datos SQLite (Usuarios y Estadísticas)
+# 2. Funciones Auxiliares de Limpieza
+# ---------------------------------------------------------
+def clean_phone(phone_str: str) -> str:
+    """Extrae únicamente los dígitos de una cadena de teléfono."""
+    if not phone_str:
+        return ""
+    return re.sub(r'\D', '', phone_str)
+
+# ---------------------------------------------------------
+# 3. Base de Datos SQLite (Usuarios, Permisos y Estadísticas)
 # ---------------------------------------------------------
 def init_db():
-    """Inicializa la tabla de usuarios si no existe."""
+    """Inicializa la base de datos y migra columnas si es necesario."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            telegram_id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE,
+            email TEXT UNIQUE,
+            phone TEXT UNIQUE,
             username TEXT,
             first_name TEXT,
             role TEXT DEFAULT 'user',
@@ -63,10 +76,19 @@ def init_db():
             profit_units REAL DEFAULT 0.0
         )
     ''')
+    
+    # Auto-migración para agregar columnas email/phone si la BD ya existía
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "email" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    if "phone" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+        
     conn.commit()
     conn.close()
 
-def get_user(telegram_id: int):
+def get_user_by_telegram_id(telegram_id: int):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -75,34 +97,116 @@ def get_user(telegram_id: int):
     conn.close()
     return dict(row) if row else None
 
-def register_user(telegram_id: int, username: str, first_name: str, role: str = 'user', is_active: int = 1):
+def get_user_by_email(email_str: str):
+    if not email_str:
+        return None
+    target = email_str.strip().lower()
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE LOWER(email) = ?", (target,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_user_by_phone(phone_str: str):
+    target = clean_phone(phone_str)
+    if not target:
+        return None
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE phone IS NOT NULL AND phone != ''")
+    rows = cursor.fetchall()
+    conn.close()
+    for r in rows:
+        if clean_phone(r['phone']) == target or (len(target) >= 8 and target in clean_phone(r['phone'])):
+            return dict(r)
+    return None
+
+def add_or_update_user_permission(identifier: str, is_active: int = 1, role: str = 'user'):
+    """Agrega o habilita un usuario mediante Email, Teléfono o Telegram ID."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute('''
-        INSERT INTO users (telegram_id, username, first_name, role, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(telegram_id) DO UPDATE SET
-            username = excluded.username,
-            first_name = excluded.first_name
-    ''', (telegram_id, username or "", first_name or "", role, is_active, created_at))
+
+    # Caso 1: Correo Electrónico
+    if "@" in identifier:
+        email_clean = identifier.strip().lower()
+        cursor.execute('''
+            INSERT INTO users (email, role, is_active, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET is_active = excluded.is_active
+        ''', (email_clean, role, is_active, created_at))
+
+    # Caso 2: Número de Teléfono (con signo + o más de 7 dígitos)
+    elif identifier.startswith("+") or (len(clean_phone(identifier)) >= 8 and not identifier.isdigit() or len(identifier) >= 10):
+        phone_clean = clean_phone(identifier)
+        cursor.execute('''
+            INSERT INTO users (phone, role, is_active, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(phone) DO UPDATE SET is_active = excluded.is_active
+        ''', (phone_clean, role, is_active, created_at))
+
+    # Caso 3: Telegram ID
+    elif identifier.isdigit():
+        tg_id = int(identifier)
+        cursor.execute('''
+            INSERT INTO users (telegram_id, role, is_active, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET is_active = excluded.is_active
+        ''', (tg_id, role, is_active, created_at))
+
     conn.commit()
     conn.close()
 
-def set_user_status(telegram_id: int, is_active: int):
+def link_telegram_id_to_user(user_db_id: int, telegram_id: int, username: str, first_name: str):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET is_active = ? WHERE telegram_id = ?", (is_active, telegram_id))
-    rows = cursor.rowcount
+    cursor.execute('''
+        UPDATE users 
+        SET telegram_id = ?, username = ?, first_name = ?, is_active = 1
+        WHERE id = ?
+    ''', (telegram_id, username or "", first_name or "", user_db_id))
+    conn.commit()
+    conn.close()
+
+def modify_user_status_by_identifier(identifier: str, is_active: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    rows = 0
+
+    if "@" in identifier:
+        cursor.execute("UPDATE users SET is_active = ? WHERE LOWER(email) = ?", (is_active, identifier.strip().lower()))
+        rows = cursor.rowcount
+    elif identifier.isdigit() and len(identifier) < 11:
+        cursor.execute("UPDATE users SET is_active = ? WHERE telegram_id = ?", (is_active, int(identifier)))
+        rows = cursor.rowcount
+    else:
+        phone_clean = clean_phone(identifier)
+        cursor.execute("UPDATE users SET is_active = ? WHERE phone LIKE ?", (is_active, f"%{phone_clean}%"))
+        rows = cursor.rowcount
+
     conn.commit()
     conn.close()
     return rows > 0
 
-def delete_user(telegram_id: int):
+def delete_user_by_identifier(identifier: str):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
-    rows = cursor.rowcount
+    rows = 0
+
+    if "@" in identifier:
+        cursor.execute("DELETE FROM users WHERE LOWER(email) = ?", (identifier.strip().lower(),))
+        rows = cursor.rowcount
+    elif identifier.isdigit() and len(identifier) < 11:
+        cursor.execute("DELETE FROM users WHERE telegram_id = ?", (int(identifier),))
+        rows = cursor.rowcount
+    else:
+        phone_clean = clean_phone(identifier)
+        cursor.execute("DELETE FROM users WHERE phone LIKE ?", (f"%{phone_clean}%",))
+        rows = cursor.rowcount
+
     conn.commit()
     conn.close()
     return rows > 0
@@ -150,18 +254,18 @@ def is_admin(user_id: int) -> bool:
     if admin_env and str(user_id) == str(admin_env).strip():
         return True
     
-    user = get_user(user_id)
+    user = get_user_by_telegram_id(user_id)
     if user and user.get("role") == "admin":
         return True
         
     all_users = get_all_users()
     if not all_users:
-        return True  # El primer usuario en interactuar es nombrado Admin si la BD está vacía
+        return True
         
     return False
 
 # ---------------------------------------------------------
-# 3. Servidor HTTP de Salud (Render Port Binding)
+# 4. Servidor HTTP de Salud (Render Port Binding)
 # ---------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -184,8 +288,14 @@ def start_health_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 4. Control de Acceso (Middleware)
+# 5. Control de Acceso y Pantalla de Verificación
 # ---------------------------------------------------------
+def get_verification_reply_keyboard():
+    keyboard = [
+        [KeyboardButton("📱 Compartir mi teléfono", request_contact=True)]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
 async def check_access(update: Update) -> bool:
     user = update.effective_user
     if not user:
@@ -195,21 +305,25 @@ async def check_access(update: Update) -> bool:
     username = user.username or ""
     first_name = user.first_name or ""
 
+    # Administrador siempre tiene paso libre
     if is_admin(user_id):
-        register_user(user_id, username, first_name, role='admin', is_active=1)
+        db_u = get_user_by_telegram_id(user_id)
+        if not db_u:
+            add_or_update_user_permission(str(user_id), is_active=1, role='admin')
+            db_u = get_user_by_telegram_id(user_id)
+            link_telegram_id_to_user(db_u['id'], user_id, username, first_name)
         return True
 
-    db_user = get_user(user_id)
-    if not db_user:
-        register_user(user_id, username, first_name, role='user', is_active=0)
-        db_user = get_user(user_id)
+    # Verificar por Telegram ID vinculado
+    db_user = get_user_by_telegram_id(user_id)
+    if db_user and db_user.get("is_active") == 1:
+        return True
 
-    if db_user.get("is_active") != 1:
+    if db_user and db_user.get("is_active") == 0:
         msg = (
-            "⛔ *ACCESO RESTRINGIDO*\n\n"
-            "Tu cuenta no está autorizada para usar **NosticProno**.\n"
-            f"📌 *Tu Telegram ID:* `{user_id}`\n\n"
-            "Envía esta ID al administrador para que habilite tu acceso."
+            "⛔ *CUENTA SUSPENDIDA*\n\n"
+            "Tu acceso a **NosticProno** ha sido desactivado por el administrador.\n"
+            f"📌 *Tu Telegram ID:* `{user_id}`"
         )
         if update.message:
             await update.message.reply_text(msg, parse_mode="Markdown")
@@ -217,11 +331,23 @@ async def check_access(update: Update) -> bool:
             await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
         return False
 
-    register_user(user_id, username, first_name, role=db_user.get('role', 'user'), is_active=1)
-    return True
+    # Si no está verificado, mostrar menú de verificación
+    verify_msg = (
+        "⛔ *ACCESO RESTRINGIDO / VERIFICACIÓN DE CUENTA*\n\n"
+        "Para ingresar a **NosticProno**, tu cuenta debe estar pre-aprobada por el administrador.\n\n"
+        "👇 *Verifica tu identidad usando una de estas dos opciones:*\n"
+        "1️⃣ Presiona el botón *'📱 Compartir mi teléfono'* abajo.\n"
+        "2️⃣ O escribe tu **correo electrónico** directamente en este chat.\n\n"
+        f"📌 *Tu Telegram ID:* `{user_id}`"
+    )
+    if update.message:
+        await update.message.reply_text(verify_msg, parse_mode="Markdown", reply_markup=get_verification_reply_keyboard())
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(verify_msg, parse_mode="Markdown")
+    return False
 
 # ---------------------------------------------------------
-# 5. Conversor de Horario a Zona Local (Uruguay)
+# 6. Conversor de Horario a Zona Local (Uruguay)
 # ---------------------------------------------------------
 def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> str:
     fixture_data = fix.get("fixture", {})
@@ -244,7 +370,7 @@ def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> st
     return "--:--"
 
 # ---------------------------------------------------------
-# 6. Modelos Matemáticos (Poisson & Kelly)
+# 7. Modelos Matemáticos (Poisson & Kelly)
 # ---------------------------------------------------------
 def poisson_pmf(lmbda: float, k: int) -> float:
     if lmbda <= 0:
@@ -333,7 +459,7 @@ def generate_fixture_analytics(fix: dict):
     }
 
 # ---------------------------------------------------------
-# 7. API-Football Integration
+# 8. API-Football Integration
 # ---------------------------------------------------------
 _cached_fixtures = {}
 CACHE_TTL_SECONDS = 900
@@ -398,7 +524,7 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     return None, "ERROR"
 
 # ---------------------------------------------------------
-# 8. Teclados de la Interfaz (UI)
+# 9. Teclados de la Interfaz (UI)
 # ---------------------------------------------------------
 def get_main_reply_keyboard(user_id: int = None):
     keyboard = [
@@ -425,7 +551,7 @@ def get_date_inline_keyboard(category_code: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------
-# 9. Comandos de Administración
+# 10. Comandos de Administración
 # ---------------------------------------------------------
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
@@ -439,10 +565,11 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *PANEL DE ADMINISTRACIÓN - NOSTICPRONO*\n\n"
         "Comandos de gestión rápida:\n"
         "• `/usuarios` - Ver lista completa de usuarios\n"
-        "• `/agregar <ID>` - Habilitar un usuario\n"
-        "• `/bloquear <ID>` - Deshabilitar un usuario\n"
-        "• `/activar <ID>` - Reactivar usuario\n"
-        "• `/eliminar <ID>` - Borrar usuario\n"
+        "• `/agregar <email|teléfono|ID>` - Habilitar usuario\n"
+        "• `/bloquear <email|teléfono|ID>` - Deshabilitar usuario\n"
+        "• `/activar <email|teléfono|ID>` - Reactivar usuario\n"
+        "• `/eliminar <email|teléfono|ID>` - Borrar usuario\n\n"
+        "💡 *Ejemplos:* `/agregar cliente@gmail.com` o `/agregar +59899123456`"
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -452,9 +579,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(admin_text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def usuarios_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
-        return
-    if not is_admin(update.effective_user.id):
+    if not await check_access(update) or not is_admin(update.effective_user.id):
         return
 
     users = get_all_users()
@@ -466,9 +591,20 @@ async def usuarios_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for u in users:
         status_icon = "🟢 Activo" if u["is_active"] == 1 else "🔴 Bloqueado"
         role_icon = "👑 Admin" if u["role"] == "admin" else "👤 User"
-        uname = f"@{u['username']}" if u['username'] else u['first_name']
+        uname = f"@{u['username']}" if u['username'] else u['first_name'] or "Sin verificar"
+        
+        identifier_info = []
+        if u['email']:
+            identifier_info.append(f"📧 {u['email']}")
+        if u['phone']:
+            identifier_info.append(f"📱 +{u['phone']}")
+        if u['telegram_id']:
+            identifier_info.append(f"🆔 `{u['telegram_id']}`")
+
+        id_str = " | ".join(identifier_info) if identifier_info else f"ID: `{u['id']}`"
+
         lines.append(
-            f"• `{u['telegram_id']}` | {uname} | {role_icon} | {status_icon}\n"
+            f"• {id_str} | {uname} | {role_icon} | {status_icon}\n"
             f"  └ Apuestas: `{u['bets_count']}` | P/L: `{u['profit_units']:+.1f}u`"
         )
 
@@ -478,66 +614,88 @@ async def agregar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update) or not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("⚠ Uso: `/agregar <TELEGRAM_ID>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠ Uso: `/agregar <EMAIL | TELÉFONO | TELEGRAM_ID>`\n\nEjemplo: `/agregar cliente@gmail.com`", parse_mode="Markdown")
         return
 
-    try:
-        target_id = int(context.args[0])
-        register_user(target_id, "", "Usuario", role='user', is_active=1)
-        await update.message.reply_text(f"✅ Usuario `{target_id}` habilitado correctamente.", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+    identifier = " ".join(context.args).strip()
+    add_or_update_user_permission(identifier, is_active=1, role='user')
+    await update.message.reply_text(f"✅ Usuario pre-aprobado habilitado: `{identifier}`", parse_mode="Markdown")
 
 async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update) or not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("⚠ Uso: `/bloquear <TELEGRAM_ID>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠ Uso: `/bloquear <EMAIL | TELÉFONO | TELEGRAM_ID>`", parse_mode="Markdown")
         return
 
-    try:
-        target_id = int(context.args[0])
-        if set_user_status(target_id, 0):
-            await update.message.reply_text(f"🔴 Usuario `{target_id}` bloqueado.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"⚠ Usuario `{target_id}` no encontrado.")
-    except ValueError:
-        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+    identifier = " ".join(context.args).strip()
+    if modify_user_status_by_identifier(identifier, 0):
+        await update.message.reply_text(f"🔴 Usuario `{identifier}` bloqueado.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"⚠ No se encontró ningún registro para `{identifier}`.", parse_mode="Markdown")
 
 async def activar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update) or not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("⚠ Uso: `/activar <TELEGRAM_ID>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠ Uso: `/activar <EMAIL | TELÉFONO | TELEGRAM_ID>`", parse_mode="Markdown")
         return
 
-    try:
-        target_id = int(context.args[0])
-        if set_user_status(target_id, 1):
-            await update.message.reply_text(f"🟢 Usuario `{target_id}` reactivado.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"⚠ Usuario `{target_id}` no encontrado.")
-    except ValueError:
-        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+    identifier = " ".join(context.args).strip()
+    if modify_user_status_by_identifier(identifier, 1):
+        await update.message.reply_text(f"🟢 Usuario `{identifier}` reactivado.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"⚠ No se encontró ningún registro para `{identifier}`.", parse_mode="Markdown")
 
 async def eliminar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update) or not is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("⚠ Uso: `/eliminar <TELEGRAM_ID>`", parse_mode="Markdown")
+        await update.message.reply_text("⚠ Uso: `/eliminar <EMAIL | TELÉFONO | TELEGRAM_ID>`", parse_mode="Markdown")
         return
 
-    try:
-        target_id = int(context.args[0])
-        if delete_user(target_id):
-            await update.message.reply_text(f"❌ Usuario `{target_id}` eliminado de la base de datos.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"⚠ Usuario `{target_id}` no encontrado.")
-    except ValueError:
-        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+    identifier = " ".join(context.args).strip()
+    if delete_user_by_identifier(identifier):
+        await update.message.reply_text(f"❌ Registro `{identifier}` eliminado de la base de datos.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"⚠ No se encontró ningún registro para `{identifier}`.", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 10. Callback Query Handler (Admin & Usuarios)
+# 11. Verificación por Teléfono y Correo
+# ---------------------------------------------------------
+async def contact_verification_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact = update.effective_message.contact
+    user = update.effective_user
+
+    if not contact or not user:
+        return
+
+    if contact.user_id != user.id:
+        await update.message.reply_text("⚠ Por favor, comparte tu propio número de teléfono usando el botón nativo.")
+        return
+
+    user_phone = contact.phone_number
+    matched_user = get_user_by_phone(user_phone)
+
+    if matched_user and matched_user.get("is_active") == 1:
+        link_telegram_id_to_user(matched_user['id'], user.id, user.username, user.first_name)
+        await update.message.reply_text(
+            f"🎉 *¡VERIFICACIÓN EXITOSA!*\n\n"
+            f"Bienvenido {user.first_name}. Tu número `+{clean_phone(user_phone)}` ha sido verificado con éxito.",
+            parse_mode="Markdown",
+            reply_markup=get_main_reply_keyboard(user.id)
+        )
+    elif matched_user and matched_user.get("is_active") == 0:
+        await update.message.reply_text("⛔ Tu cuenta se encuentra suspendida por el administrador.")
+    else:
+        await update.message.reply_text(
+            f"❌ El número `+{clean_phone(user_phone)}` no figura en la lista de usuarios pre-aprobados.\n"
+            f"Contacta al administrador para solicitar acceso.",
+            parse_mode="Markdown"
+        )
+
+# ---------------------------------------------------------
+# 12. Callback Query Handler
 # ---------------------------------------------------------
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -549,8 +707,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         lines = ["📋 *LISTA DE USUARIOS:*\n"]
         for u in users:
             status = "🟢 Activo" if u["is_active"] == 1 else "🔴 Bloqueado"
-            uname = f"@{u['username']}" if u['username'] else u['first_name']
-            lines.append(f"• `{u['telegram_id']}` | {uname} | {status}")
+            uname = f"@{u['username']}" if u['username'] else u['first_name'] or "Sin verificar"
+            lines.append(f"• `{u['email'] or u['phone'] or u['telegram_id']}` | {uname} | {status}")
         await query.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     elif data == "adm_stats":
@@ -571,18 +729,18 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data == "stat_win":
         update_user_stats(query.from_user.id, is_win=True, units=1.0)
-        await query.edit_message_text("✅ *Acierto registrado (+1.0u).* Usa '📊 Mis Estadísticas' para ver el balance actualizado.", parse_mode="Markdown")
+        await query.edit_message_text("✅ *Acierto registrado (+1.0u).* Usa '📊 Mis Estadísticas' para ver tu balance.", parse_mode="Markdown")
 
     elif data == "stat_loss":
         update_user_stats(query.from_user.id, is_win=False, units=1.0)
-        await query.edit_message_text("❌ *Fallo registrado (-1.0u).* Usa '📊 Mis Estadísticas' para ver el balance actualizado.", parse_mode="Markdown")
+        await query.edit_message_text("❌ *Fallo registrado (-1.0u).* Usa '📊 Mis Estadísticas' para ver tu balance.", parse_mode="Markdown")
 
     elif data == "stat_reset":
         reset_user_stats(query.from_user.id)
         await query.edit_message_text("🔄 *Tus estadísticas han sido reiniciadas a 0.*", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 11. Procesador de Fechas / Partidos
+# 13. Procesador de Fechas / Partidos
 # ---------------------------------------------------------
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -729,14 +887,14 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(response, parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 12. Sección "Mis Estadísticas" de Usuario
+# 14. Sección "Mis Estadísticas" de Usuario
 # ---------------------------------------------------------
 async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
         return
 
     user_id = update.effective_user.id
-    u = get_user(user_id)
+    u = get_user_by_telegram_id(user_id)
     if not u:
         await update.message.reply_text("⚠ No se encontraron registros de usuario.")
         return
@@ -750,7 +908,7 @@ async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     stats_msg = (
         f"📊 *MIS ESTADÍSTICAS PERSONALIZADAS*\n\n"
         f"👤 *Usuario:* {u['first_name']} (`{user_id}`)\n"
-        f"📅 *Miembro desde:* `{u['created_at'][:10]}`\n\n"
+        f"📅 *Miembro desde:* `{u['created_at'][:10] if u['created_at'] else 'N/A'}`\n\n"
         f"• *Apuestas Registradas:* `{total}`\n"
         f"• *Aciertos (Ganadas):* `{wins}`\n"
         f"• *Fallos (Perdidas):* `{losses}`\n"
@@ -770,7 +928,7 @@ async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(stats_msg, parse_mode="Markdown", reply_markup=keyboard)
 
 # ---------------------------------------------------------
-# 13. Router de Menú Principal
+# 15. Router de Menú Principal y Texto
 # ---------------------------------------------------------
 async def prompt_date_selection(update: Update, category_code: str, title: str):
     text = f"🗓️ *Selecciona la jornada para {title}:*"
@@ -781,10 +939,35 @@ async def prompt_date_selection(update: Update, category_code: str, title: str):
     )
 
 async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    user = update.effective_user
+
+    # Intento de verificación por correo si el usuario envía un mail
+    if "@" in text and "." in text and not get_user_by_telegram_id(user.id):
+        matched_user = get_user_by_email(text)
+        if matched_user and matched_user.get("is_active") == 1:
+            link_telegram_id_to_user(matched_user['id'], user.id, user.username, user.first_name)
+            await update.message.reply_text(
+                f"🎉 *¡VERIFICACIÓN EXITOSA!*\n\n"
+                f"Bienvenido {user.first_name}. Tu correo `{text.lower()}` ha sido verificado con éxito.",
+                parse_mode="Markdown",
+                reply_markup=get_main_reply_keyboard(user.id)
+            )
+            return
+        elif matched_user and matched_user.get("is_active") == 0:
+            await update.message.reply_text("⛔ Tu cuenta se encuentra suspendida por el administrador.")
+            return
+        else:
+            await update.message.reply_text(
+                f"❌ El correo `{text.lower()}` no está en la lista de usuarios pre-aprobados.\n"
+                f"Verifica que esté bien escrito o solicita acceso al administrador.",
+                parse_mode="Markdown"
+            )
+            return
+
     if not await check_access(update):
         return
 
-    text = update.message.text
     if "1X2 / Ganador" in text:
         await prompt_date_selection(update, "cat1x2", "1X2 / Ganador")
     elif "Goles & BTTS" in text:
@@ -883,7 +1066,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Error no capturado:", exc_info=context.error)
 
 # ---------------------------------------------------------
-# 14. Punto de Entrada Principal (Main)
+# 16. Punto de Entrada Principal (Main)
 # ---------------------------------------------------------
 def main():
     token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
@@ -894,9 +1077,12 @@ def main():
     init_db()
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot con sistema de usuarios...")
+    logger.info("Inicializando NosticProno Bot con verificación dual por Email/Teléfono...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
+    # Handlers para Verificación de Contacto y Comandos
+    application.add_handler(MessageHandler(filters.CONTACT, contact_verification_handler))
+    
     # Comandos Usuario / General
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -911,7 +1097,7 @@ def main():
     application.add_handler(CommandHandler("activar", activar_command))
     application.add_handler(CommandHandler("eliminar", eliminar_command))
 
-    # Callbacks & Mensajes
+    # Callbacks & Mensajes de Texto
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(adm_|stat_)"))
     application.add_handler(CallbackQueryHandler(date_callback_handler, pattern="^cat"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
