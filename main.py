@@ -26,10 +26,9 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------
-# Configuración
+# Configuración Global
 # ---------------------------------------------------------
-# Cambia esta zona horaria si necesitas otra (ej: "America/Argentina/Buenos_Aires")
-LOCAL_TIMEZONE_NAME = "America/Montevideo" 
+LOCAL_TIMEZONE_NAME = "America/Montevideo"
 UTC_OFFSET_HOURS = -3
 
 # ---------------------------------------------------------
@@ -47,9 +46,9 @@ logger = logging.getLogger(__name__)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot OK - NosticProno Active")
+        self.wfile.write(b"OK - NosticProno Bot Activo")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -59,22 +58,22 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         pass
 
 def start_health_server():
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     logger.info(f"Servidor HTTP de salud activo en el puerto {port}")
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 3. Conversor de Horario Infalible (Timestamp / ISO)
+# 3. Conversor de Horario a Zona Local (Uruguay)
 # ---------------------------------------------------------
 def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> str:
     """
-    Obtiene la hora exacta local (HH:MM) utilizando el Timestamp Unix
-    de la API o extrayendo la hora local enviada.
+    Formatea la hora del encuentro a HH:MM considerando el timestamp Unix
+    o la hora parseada de la API en formato ISO.
     """
     fixture_data = fix.get("fixture", {})
     
-    # Método 1: Usar Timestamp Unix (100% exacto)
+    # 1. Intentar por Timestamp Unix
     ts = fixture_data.get("timestamp")
     if ts:
         try:
@@ -84,12 +83,11 @@ def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> st
         except Exception:
             pass
 
-    # Método 2: Fallback por texto ISO
+    # 2. Fallback por texto ISO
     iso_date_str = fixture_data.get("date", "")
     if iso_date_str and "T" in iso_date_str:
         try:
-            time_part = iso_date_str.split("T")[1]
-            return time_part[:5]
+            return iso_date_str.split("T")[1][:5]
         except Exception:
             pass
 
@@ -185,13 +183,14 @@ def generate_fixture_analytics(fix: dict):
     }
 
 # ---------------------------------------------------------
-# 5. Integración API con Zona Horaria y Caché
+# 5. Integración API-Football con Caché por Fecha
 # ---------------------------------------------------------
 _cached_fixtures = {}
-CACHE_TTL_SECONDS = 900  # 15 Minutos
+CACHE_TTL_SECONDS = 900  # 15 minutos de caché
 
 def get_target_date_str(offset_days: int) -> tuple[str, str]:
-    target_dt = datetime.now() + timedelta(days=offset_days)
+    tz_uy = timezone(timedelta(hours=UTC_OFFSET_HOURS))
+    target_dt = datetime.now(tz=tz_uy) + timedelta(days=offset_days)
     date_str = target_dt.strftime("%Y-%m-%d")
 
     if offset_days == 0:
@@ -215,10 +214,9 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     if date_str in _cached_fixtures:
         cache_entry = _cached_fixtures[date_str]
         if current_time - cache_entry["timestamp"] < CACHE_TTL_SECONDS:
-            logger.info(f"Devolviendo caché para la fecha {date_str}.")
+            logger.info(f"Devolviendo caché para {date_str}.")
             return cache_entry["data"], "OK"
 
-    # Se solicita la zona horaria directamente en la consulta HTTP
     url = f"https://v3.football.api-sports.io/fixtures?date={date_str}&timezone={LOCAL_TIMEZONE_NAME}"
     headers = {"x-apisports-key": api_key}
 
@@ -251,7 +249,7 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     return None, "ERROR"
 
 # ---------------------------------------------------------
-# 6. Teclados UI
+# 6. Teclados de la Interfaz (UI)
 # ---------------------------------------------------------
 def get_main_reply_keyboard():
     keyboard = [
@@ -276,7 +274,7 @@ def get_date_inline_keyboard(category_code: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------
-# 7. Menús de Selección de Fecha
+# 7. Selección de Jornada
 # ---------------------------------------------------------
 async def prompt_date_selection(update: Update, category_code: str, title: str):
     text = f"🗓️ *Selecciona la jornada para {title}:*"
@@ -287,7 +285,7 @@ async def prompt_date_selection(update: Update, category_code: str, title: str):
     )
 
 # ---------------------------------------------------------
-# 8. Callback Query Handler
+# 8. Procesador de Consultas e Inline Buttons
 # ---------------------------------------------------------
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -320,7 +318,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             away = teams.get("away", {}).get("name", "Visitante")
             
             match_time = format_match_time(fix)
-
             analytics = generate_fixture_analytics(fix)
             p_home = analytics["metrics"]["p_home"]
             odds_home = analytics["odds_home"]
@@ -345,7 +342,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             away = teams.get("away", {}).get("name")
             
             match_time = format_match_time(fix)
-
             analytics = generate_fixture_analytics(fix)
             p_over = analytics["metrics"]["p_over_25"]
             p_btts = analytics["metrics"]["p_btts_yes"]
@@ -369,7 +365,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             away = teams.get("away", {}).get("name")
             
             match_time = format_match_time(fix)
-
             analytics = generate_fixture_analytics(fix)
 
             projections.append(
@@ -435,7 +430,6 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         away = teams.get("away", {}).get("name")
         
         match_time = format_match_time(fix)
-
         analytics = generate_fixture_analytics(fix)
         p_home = analytics["metrics"]["p_home"]
         odds_home = analytics["odds_home"]
@@ -470,8 +464,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Error no capturado durante el procesamiento:", exc_info=context.error)
+
 # ---------------------------------------------------------
-# 10. Router de Botones de Texto
+# 10. Manejador de Botones de Texto
 # ---------------------------------------------------------
 async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -499,7 +496,7 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await help_command(update, context)
 
 # ---------------------------------------------------------
-# 11. Handlers de Comandos Básicos
+# 11. Comando de Inicio
 # ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
@@ -512,7 +509,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 # ---------------------------------------------------------
-# 12. Ejecución Principal
+# 12. Punto de Entrada Principal (Main)
 # ---------------------------------------------------------
 def main():
     token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
@@ -520,19 +517,26 @@ def main():
         logger.error("Error crítico: TELEGRAM_BOT_TOKEN no configurado.")
         sys.exit(1)
 
+    # Inicia el servidor HTTP de salud en segundo plano para Render
     threading.Thread(target=start_health_server, daemon=True).start()
 
     logger.info("Inicializando NosticProno Bot...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
+    # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", top_value_command))
     application.add_handler(CallbackQueryHandler(date_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
+    # Error Handler
+    application.add_error_handler(error_handler)
+
     logger.info("Bot activo en Telegram.")
-    application.run_polling()
+    
+    # Previene el error 409 Conflict descartando updates antiguos al arrancar
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
