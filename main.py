@@ -58,7 +58,25 @@ def start_health_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 3. Modelos Matemáticos (Poisson & Kelly)
+# 3. Conversor de Horario Universal (UTC) a Hora Local
+# ---------------------------------------------------------
+def format_match_time(iso_date_str: str, utc_offset_hours: int = -3) -> str:
+    """
+    Convierte la fecha ISO en UTC entregada por la API a la hora local.
+    Por defecto utc_offset_hours=-3 ajusta a GMT-3 (Uruguay / Argentina).
+    """
+    if not iso_date_str:
+        return "--:--"
+    try:
+        clean_str = iso_date_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(clean_str)
+        local_dt = dt + timedelta(hours=utc_offset_hours)
+        return local_dt.strftime("%H:%M")
+    except Exception:
+        return iso_date_str[11:16] if len(iso_date_str) >= 16 else "--:--"
+
+# ---------------------------------------------------------
+# 4. Modelos Matemáticos (Poisson & Kelly)
 # ---------------------------------------------------------
 def poisson_pmf(lmbda: float, k: int) -> float:
     if lmbda <= 0:
@@ -113,7 +131,7 @@ def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_frac
 
     return round(f_star * bankroll_fraction * 100, 2)
 
-# Generator de Métricas Dinámicas por Partido
+# Generador de Métricas Dinámicas por Partido
 def generate_fixture_analytics(fix: dict):
     fix_id = fix.get("fixture", {}).get("id", 0)
     seed = int(hashlib.md5(str(fix_id).encode()).hexdigest(), 16)
@@ -150,7 +168,7 @@ def generate_fixture_analytics(fix: dict):
     }
 
 # ---------------------------------------------------------
-# 4. Integración API con Caché por Fecha
+# 5. Integración API con Caché por Fecha
 # ---------------------------------------------------------
 _cached_fixtures = {}
 CACHE_TTL_SECONDS = 900  # 15 Minutos de caché por fecha
@@ -215,7 +233,7 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     return None, "ERROR"
 
 # ---------------------------------------------------------
-# 5. Teclados UI
+# 6. Teclados UI
 # ---------------------------------------------------------
 def get_main_reply_keyboard():
     keyboard = [
@@ -240,7 +258,7 @@ def get_date_inline_keyboard(category_code: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------
-# 6. Menús de Selección de Fecha
+# 7. Menús de Selección de Fecha
 # ---------------------------------------------------------
 async def prompt_date_selection(update: Update, category_code: str, title: str):
     text = f"🗓️ *Selecciona la jornada para {title}:*"
@@ -251,7 +269,7 @@ async def prompt_date_selection(update: Update, category_code: str, title: str):
     )
 
 # ---------------------------------------------------------
-# 7. Callback Query Handler
+# 8. Callback Query Handler
 # ---------------------------------------------------------
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -270,10 +288,10 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("🔑 *Clave de API no configurada.*", parse_mode="Markdown")
         return
     elif status == "QUOTA_EXCEEDED":
-        await query.edit_message_text("⚠️️ *Límite de la API alcanzado.*", parse_mode="Markdown")
+        await query.edit_message_text("⚠ *Límite de la API alcanzado.*", parse_mode="Markdown")
         return
     elif not fixtures:
-        await query.edit_message_text(f"ℹ️ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
+        await query.edit_message_text(f"ℹ️️ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
         return
 
     if category_code == "cat1x2":
@@ -282,7 +300,9 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
-            match_time = fix.get("fixture", {}).get("date", "")[11:16]
+            
+            # Formato de hora ajustado a GMT-3
+            match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
 
             analytics = generate_fixture_analytics(fix)
             p_home = analytics["metrics"]["p_home"]
@@ -306,7 +326,9 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
-            match_time = fix.get("fixture", {}).get("date", "")[11:16]
+            
+            # Formato de hora ajustado a GMT-3
+            match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
 
             analytics = generate_fixture_analytics(fix)
             p_over = analytics["metrics"]["p_over_25"]
@@ -329,7 +351,9 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
-            match_time = fix.get("fixture", {}).get("date", "")[11:16]
+            
+            # Formato de hora ajustado a GMT-3
+            match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
 
             analytics = generate_fixture_analytics(fix)
 
@@ -378,7 +402,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(response, parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 8. Comandos Especiales (Top Value & Ayuda)
+# 9. Comandos Especiales (Top Value & Ayuda)
 # ---------------------------------------------------------
 async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loading_msg = await update.message.reply_text("🔄 Filtrando los mejores picks +EV de la jornada...")
@@ -394,7 +418,9 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         teams = fix.get("teams", {})
         home = teams.get("home", {}).get("name")
         away = teams.get("away", {}).get("name")
-        match_time = fix.get("fixture", {}).get("date", "")[11:16]
+        
+        # Formato de hora ajustado a GMT-3
+        match_time = format_match_time(fix.get("fixture", {}).get("date", ""), utc_offset_hours=-3)
 
         analytics = generate_fixture_analytics(fix)
         p_home = analytics["metrics"]["p_home"]
@@ -431,7 +457,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 # ---------------------------------------------------------
-# 9. Router de Botones de Texto
+# 10. Router de Botones de Texto
 # ---------------------------------------------------------
 async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -459,7 +485,7 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await help_command(update, context)
 
 # ---------------------------------------------------------
-# 10. Handlers de Comandos Básicos
+# 11. Handlers de Comandos Básicos
 # ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
@@ -472,7 +498,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 # ---------------------------------------------------------
-# 11. Ejecución Principal
+# 12. Ejecución Principal
 # ---------------------------------------------------------
 def main():
     token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
