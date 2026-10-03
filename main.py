@@ -16,7 +16,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# Diagnóstico de variables en Render
+all_env_keys = list(os.environ.keys())
+logger.info(f"Keys encontradas en el entorno: {[k for k in all_env_keys if 'TELEGRAM' in k or 'TOKEN' in k or 'ODDS' in k]}")
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 main_keyboard = InlineKeyboardMarkup([
     [
