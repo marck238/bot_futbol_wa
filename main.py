@@ -87,8 +87,9 @@ def init_db():
                 wins INT DEFAULT 0,
                 losses INT DEFAULT 0,
                 profit_units DOUBLE PRECISION DEFAULT 0.0
-            );
-
+            )
+        ''')
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_picks (
                 id SERIAL PRIMARY KEY,
                 telegram_id BIGINT,
@@ -101,7 +102,7 @@ def init_db():
                 status VARCHAR(50) DEFAULT 'PENDING',
                 created_at VARCHAR(100),
                 settled_at VARCHAR(100)
-            );
+            )
         ''')
     else:
         cursor.execute('''
@@ -119,8 +120,9 @@ def init_db():
                 wins INTEGER DEFAULT 0,
                 losses INTEGER DEFAULT 0,
                 profit_units REAL DEFAULT 0.0
-            );
-
+            )
+        ''')
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_picks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER,
@@ -133,7 +135,7 @@ def init_db():
                 status TEXT DEFAULT 'PENDING',
                 created_at TEXT,
                 settled_at TEXT
-            );
+            )
         ''')
 
     conn.commit()
@@ -762,14 +764,12 @@ async def fetch_fixture_by_id(fixture_id: int):
 # 9. Tarea en Segundo Plano: Auto-Settlement de Apuestas
 # ---------------------------------------------------------
 async def auto_settlement_worker(app):
-    """Revisa periódicamente los picks pendientes y los liquida automáticamente."""
     while True:
         try:
             logger.info("Ejecutando worker de Auto-Settlement...")
             pending_picks = get_pending_picks()
 
             if pending_picks:
-                # Agrupar picks por fixture_id para minimizar llamadas a la API
                 grouped_picks = {}
                 for p in pending_picks:
                     fid = p['fixture_id']
@@ -784,7 +784,6 @@ async def auto_settlement_worker(app):
 
                     status_short = fix_data.get("fixture", {}).get("status", {}).get("short")
                     
-                    # Evaluar únicamente si el partido ya finalizó
                     if status_short in ["FT", "AET", "PEN"]:
                         goals_home = fix_data.get("goals", {}).get("home", 0) or 0
                         goals_away = fix_data.get("goals", {}).get("away", 0) or 0
@@ -810,7 +809,6 @@ async def auto_settlement_worker(app):
                                 pick['stake']
                             )
 
-                            # Enviar notificación en Telegram al usuario
                             try:
                                 result_icon = "🟢 ¡GANADA!" if is_win else "🔴 PERDIDA"
                                 profit_units = (pick['odds'] - 1.0) * pick['stake'] if is_win else -pick['stake']
@@ -829,7 +827,6 @@ async def auto_settlement_worker(app):
         except Exception as e:
             logger.error(f"Error en auto_settlement_worker: {e}")
 
-        # Ejecutar verificación cada 30 minutos (1800 segundos)
         await asyncio.sleep(1800)
 
 # ---------------------------------------------------------
@@ -1037,7 +1034,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text(stats_msg, parse_mode="Markdown")
 
     elif data.startswith("savepick_"):
-        # Guardar pick seleccionado por el usuario para Auto-Settlement
         _, fid, mkt, sel, odds, stake = data.split("_", 5)
         user_id = query.from_user.id
         
@@ -1418,7 +1414,7 @@ def main():
     init_db()
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot (con Auto-Settlement)...")
+    logger.info("Inicializando NosticProno Bot...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
     application.add_handler(MessageHandler(filters.CONTACT, contact_verification_handler))
@@ -1441,7 +1437,6 @@ def main():
 
     application.add_error_handler(error_handler)
 
-    # Iniciar worker de Auto-Settlement en segundo plano
     loop = asyncio.get_event_loop()
     loop.create_task(auto_settlement_worker(application))
 
