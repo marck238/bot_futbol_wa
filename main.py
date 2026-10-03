@@ -53,7 +53,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. Capa de Base de Datos Híbrida (PostgreSQL / SQLite)
+# 2. Capa de Base de Datos Híbrida e Índices (PostgreSQL / SQLite)
 # ---------------------------------------------------------
 def get_db_connection():
     db_url = os.getenv("DATABASE_URL")
@@ -137,6 +137,11 @@ def init_db():
                 settled_at TEXT
             )
         ''')
+
+    # Creación de Índices para optimización de consultas
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_picks_status ON user_picks(status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_picks_telegram_id ON user_picks(telegram_id);")
 
     conn.commit()
     conn.close()
@@ -373,6 +378,17 @@ def update_pick_and_user_stats(pick_id: int, telegram_id: int, is_win: bool, odd
             WHERE telegram_id = {ph}
         ''', (stake, telegram_id))
 
+    conn.commit()
+    conn.close()
+
+def update_pick_void(pick_id: int):
+    """Marca un pick como VOID (anulado/reembolsado) sin alterar ganancias ni pérdidas."""
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    settled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ph = "%s" if db_type == "postgres" else "?"
+    
+    cursor.execute(f"UPDATE user_picks SET status = 'VOID', settled_at = {ph} WHERE id = {ph}", (settled_at, pick_id))
     conn.commit()
     conn.close()
 
@@ -669,7 +685,7 @@ def generate_fixture_analytics(fix: dict):
     }
 
 # ---------------------------------------------------------
-# 8. API-Football Integration
+# 8. API-Football Integration con Cliente Resiliente (Retries)
 # ---------------------------------------------------------
 _cached_fixtures = {}
 CACHE_TTL_SECONDS = 900
@@ -687,6 +703,22 @@ def get_target_date_str(offset_days: int) -> tuple[str, str]:
         label = f"Pasado Mañana ({target_dt.strftime('%d/%m')})"
 
     return date_str, label
+
+async def safe_http_get(url: str, headers: dict, retries: int = 3, backoff: float = 1.0):
+    """Cliente HTTP con reintentos automáticos y Backoff Exponencial."""
+    async with httpx.AsyncClient() as client:
+        for attempt in range(retries):
+            try:
+                response = await client.get(url, headers=headers, timeout=10.0)
+                if response.status_code == 200:
+                    return response.json(), "OK"
+                elif response.status_code in (401, 403, 429):
+                    return None, "QUOTA_EXCEEDED"
+            except (httpx.RequestError, httpx.TimeoutException) as e:
+                logger.warning(f"Intento HTTP {attempt + 1}/{retries} falló para URL {url}: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(backoff * (2 ** attempt))
+    return None, "ERROR"
 
 async def fetch_api_football_fixtures_by_date(date_str: str):
     global _cached_fixtures
@@ -713,25 +745,17 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
             "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
         }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=8.0)
-            if response.status_code == 200:
-                data = response.json()
-                fixtures = data.get("response", [])
-                if fixtures:
-                    _cached_fixtures[date_str] = {
-                        "data": fixtures,
-                        "timestamp": current_time
-                    }
-                    return fixtures, "OK"
-                return [], "NO_MATCHES"
-            elif response.status_code in (401, 403, 429):
-                return None, "QUOTA_EXCEEDED"
-    except Exception as e:
-        logger.error(f"Error consultando API para {date_str}: {e}")
-
-    return None, "ERROR"
+    data, status = await safe_http_get(url, headers)
+    if status == "OK" and data:
+        fixtures = data.get("response", [])
+        if fixtures:
+            _cached_fixtures[date_str] = {
+                "data": fixtures,
+                "timestamp": current_time
+            }
+            return fixtures, "OK"
+        return [], "NO_MATCHES"
+    return None, status
 
 async def fetch_fixture_by_id(fixture_id: int):
     api_key = os.getenv("API_FOOTBALL_KEY") or os.getenv("APISPORTS_KEY")
@@ -749,19 +773,14 @@ async def fetch_fixture_by_id(fixture_id: int):
             "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
         }
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=8.0)
-            if response.status_code == 200:
-                data = response.json()
-                res = data.get("response", [])
-                return res[0] if res else None
-    except Exception as e:
-        logger.error(f"Error consultando fixture {fixture_id}: {e}")
+    data, status = await safe_http_get(url, headers)
+    if status == "OK" and data:
+        res = data.get("response", [])
+        return res[0] if res else None
     return None
 
 # ---------------------------------------------------------
-# 9. Tarea en Segundo Plano: Auto-Settlement de Apuestas
+# 9. Tarea en Segundo Plano: Auto-Settlement (Con Soporte VOID)
 # ---------------------------------------------------------
 async def auto_settlement_worker(app):
     while True:
@@ -784,6 +803,7 @@ async def auto_settlement_worker(app):
 
                     status_short = fix_data.get("fixture", {}).get("status", {}).get("short")
                     
+                    # 1. Partidos Finalizados
                     if status_short in ["FT", "AET", "PEN"]:
                         goals_home = fix_data.get("goals", {}).get("home", 0) or 0
                         goals_away = fix_data.get("goals", {}).get("away", 0) or 0
@@ -819,6 +839,21 @@ async def auto_settlement_worker(app):
                                     f"📌 *Tu Selección:* `{sel}` | Cuota: `{pick['odds']:.2f}`\n\n"
                                     f"🎯 *Estado:* {result_icon} (`{profit_units:+.2f}u`)\n"
                                     f"Tus estadísticas han sido actualizadas automáticamente."
+                                )
+                                await app.bot.send_message(chat_id=pick['telegram_id'], text=msg, parse_mode="Markdown")
+                            except Exception as err:
+                                logger.error(f"No se pudo notificar al usuario {pick['telegram_id']}: {err}")
+
+                    # 2. Partidos Cancelados / Pospuestos / Suspendidos (VOID)
+                    elif status_short in ["PST", "CANC", "ABD", "WO"]:
+                        for pick in picks:
+                            update_pick_void(pick['id'])
+                            try:
+                                msg = (
+                                    f"⚪ *APUESTA ANULADA (VOID)*\n\n"
+                                    f"⚽ *Partido:* {pick['fixture_name']}\n"
+                                    f"📌 *Estado del Partido:* `{status_short}` (Pospuesto / Suspendido)\n"
+                                    f"💰 *Stake Reembolsado:* `{pick['stake']}u` (Sin impacto en tu balance)\n"
                                 )
                                 await app.bot.send_message(chat_id=pick['telegram_id'], text=msg, parse_mode="Markdown")
                             except Exception as err:
@@ -890,7 +925,7 @@ async def usuarios_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     users = get_all_users()
     if not users:
-        await update.message.reply_text("ℹ️ No hay usuarios registrados.")
+        await update.message.reply_text("ℹ No hay usuarios registrados.")
         return
 
     lines = ["📋 *USUARIOS REGISTRADOS:*\n"]
@@ -1186,7 +1221,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif category_code == "catcombo":
         if len(target_fixtures) < 2:
-            response = f"ℹ️ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
+            response = f"ℹ️️ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
             await query.message.reply_text(response, parse_mode="Markdown")
         else:
             f1, f2 = target_fixtures[0], target_fixtures[1]
@@ -1402,6 +1437,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Error no capturado:", exc_info=context.error)
 
+# Hook asíncrono de inicialización (PTB v20+)
+async def post_init(application):
+    """Inicia la tarea de segundo plano en el bucle de eventos oficial del bot."""
+    asyncio.create_task(auto_settlement_worker(application))
+    logger.info("Task de Auto-Settlement iniciada correctamente en post_init.")
+
 # ---------------------------------------------------------
 # 17. Punto de Entrada Principal (Main)
 # ---------------------------------------------------------
@@ -1415,7 +1456,14 @@ def main():
     threading.Thread(target=start_health_server, daemon=True).start()
 
     logger.info("Inicializando NosticProno Bot...")
-    application = ApplicationBuilder().token(token_raw.strip()).build()
+    
+    # Se añade el post_init para evitar el RuntimeError del asyncio event loop
+    application = (
+        ApplicationBuilder()
+        .token(token_raw.strip())
+        .post_init(post_init)
+        .build()
+    )
 
     application.add_handler(MessageHandler(filters.CONTACT, contact_verification_handler))
     
@@ -1436,9 +1484,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
     application.add_error_handler(error_handler)
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(auto_settlement_worker(application))
 
     logger.info("Bot activo en Telegram.")
     application.run_polling(drop_pending_updates=True)
