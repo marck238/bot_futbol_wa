@@ -310,9 +310,32 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"ℹ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
         return
 
+    # --- FILTRADO Y ORDENAMIENTO CRONOLÓGICO ---
+    now_ts = int(time.time())
+
+    # Ordenar cronológicamente por horario de inicio
+    fixtures.sort(key=lambda f: f.get("fixture", {}).get("timestamp", 0))
+
+    # Para HOY: filtrar únicamente encuentros pendientes (que aún no hayan empezado)
+    if offset_days == 0:
+        valid_fixtures = [
+            f for f in fixtures
+            if f.get("fixture", {}).get("timestamp", 0) >= (now_ts - 300)
+            and f.get("fixture", {}).get("status", {}).get("short") in ["NS", "TBD", "1H", "HT", "2H"]
+        ]
+        if not valid_fixtures:
+            await query.edit_message_text(
+                f"ℹ *No quedan más partidos pendientes por disputarse en lo que resta de {label}.*",
+                parse_mode="Markdown"
+            )
+            return
+        fixtures = valid_fixtures
+
+    target_fixtures = fixtures[:5]
+
     if category_code == "cat1x2":
         picks = []
-        for fix in fixtures[:5]:
+        for fix in target_fixtures:
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
@@ -336,7 +359,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif category_code == "catgoals":
         picks = []
-        for fix in fixtures[:5]:
+        for fix in target_fixtures:
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
@@ -359,7 +382,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif category_code == "catcorners":
         projections = []
-        for fix in fixtures[:5]:
+        for fix in target_fixtures:
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
@@ -376,10 +399,10 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         response = f"🚩 *CÓRNERS Y TARJETAS - {label.upper()}*\n\n" + "\n\n---\n\n".join(projections)
 
     elif category_code == "catcombo":
-        if len(fixtures) < 2:
-            response = f"ℹ️ *No hay suficientes partidos el {label} para armar una combinada.*"
+        if len(target_fixtures) < 2:
+            response = f"ℹ️ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
         else:
-            f1, f2 = fixtures[0], fixtures[1]
+            f1, f2 = target_fixtures[0], target_fixtures[1]
             t1_h = f1.get("teams", {}).get("home", {}).get("name")
             t1_a = f1.get("teams", {}).get("away", {}).get("name")
             t2_h = f2.get("teams", {}).get("home", {}).get("name")
@@ -423,8 +446,20 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ *No hay partidos activos para evaluar en este momento.*", parse_mode="Markdown")
         return
 
+    now_ts = int(time.time())
+    fixtures.sort(key=lambda f: f.get("fixture", {}).get("timestamp", 0))
+    valid_fixtures = [
+        f for f in fixtures
+        if f.get("fixture", {}).get("timestamp", 0) >= (now_ts - 300)
+        and f.get("fixture", {}).get("status", {}).get("short") in ["NS", "TBD", "1H", "HT", "2H"]
+    ]
+
+    if not valid_fixtures:
+        await update.message.reply_text("ℹ️ *No quedan partidos pendientes por disputarse hoy.*", parse_mode="Markdown")
+        return
+
     top_picks = []
-    for fix in fixtures[:3]:
+    for fix in valid_fixtures[:3]:
         teams = fix.get("teams", {})
         home = teams.get("home", {}).get("name")
         away = teams.get("away", {}).get("name")
@@ -458,7 +493,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💡 *3. Valor Esperado (EV+)*\n"
         "Indica la **ventaja matemática** sobre la casa de apuestas. Si el EV es positivo (ej: `+8.5%`), la apuesta es rentable a largo plazo.\n\n"
         "🎯 *4. Stake Kelly (%)*\n"
-        "Es el porcentaje **máximo recomendado de tu dinero total (Banca)** para apostar en ese partido, calculado mediante el *Criterio de Kelly* para minimizar riesgos.\n\n"
+        "Es el porcentaje **máximo recomendado de tu dinero total (Banca)** para apostar en ese partido, calculated mediante el *Criterio de Kelly* para minimizar riesgos.\n\n"
         "🚩 *5. Líneas de Córners y Tarjetas*\n"
         "Muestra la proyección numérica esperada. Si indica *Más de 9.5*, el modelo proyecta que habrán 10 o más saques de esquina."
     )
@@ -517,25 +552,20 @@ def main():
         logger.error("Error crítico: TELEGRAM_BOT_TOKEN no configurado.")
         sys.exit(1)
 
-    # Inicia el servidor HTTP de salud en segundo plano para Render
     threading.Thread(target=start_health_server, daemon=True).start()
 
     logger.info("Inicializando NosticProno Bot...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", top_value_command))
     application.add_handler(CallbackQueryHandler(date_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
-    # Error Handler
     application.add_error_handler(error_handler)
 
     logger.info("Bot activo en Telegram.")
-    
-    # Previene el error 409 Conflict descartando updates antiguos al arrancar
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
