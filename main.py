@@ -113,13 +113,12 @@ def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_frac
     return round(f_star * bankroll_fraction * 100, 2)
 
 # ---------------------------------------------------------
-# 4. Integración API-Football con Caché por Fecha
+# 4. Integración API con Caché por Fecha
 # ---------------------------------------------------------
-_cached_fixtures = {}  # Estructura: { "YYYY-MM-DD": {"data": [...], "timestamp": float} }
+_cached_fixtures = {}
 CACHE_TTL_SECONDS = 900  # 15 Minutos de caché por fecha
 
 def get_target_date_str(offset_days: int) -> tuple[str, str]:
-    """Retorna la fecha formateada en YYYY-MM-DD y una etiqueta amigable."""
     target_dt = datetime.now() + timedelta(days=offset_days)
     date_str = target_dt.strftime("%Y-%m-%d")
     
@@ -133,7 +132,6 @@ def get_target_date_str(offset_days: int) -> tuple[str, str]:
     return date_str, label
 
 async def fetch_api_football_fixtures_by_date(date_str: str):
-    """Consulta partidos para una fecha específica (YYYY-MM-DD) desde API-Football."""
     global _cached_fixtures
 
     api_key = os.getenv("API_FOOTBALL_KEY") or os.getenv("APISPORTS_KEY")
@@ -142,7 +140,6 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
 
     current_time = time.time()
     
-    # Revisar si existe caché válido para la fecha solicitada
     if date_str in _cached_fixtures:
         cache_entry = _cached_fixtures[date_str]
         if current_time - cache_entry["timestamp"] < CACHE_TTL_SECONDS:
@@ -152,7 +149,6 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     url = f"https://v3.football.api-sports.io/fixtures?date={date_str}"
     headers = {"x-apisports-key": api_key}
 
-    # Soporte fallback si se usa vía RapidAPI
     rapid_key = os.getenv("RAPIDAPI_KEY")
     if rapid_key:
         url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date_str}"
@@ -177,18 +173,18 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
             elif response.status_code in (401, 403, 429):
                 return None, "QUOTA_EXCEEDED"
     except Exception as e:
-        logger.error(f"Error consultando API-Football para la fecha {date_str}: {e}")
+        logger.error(f"Error consultando API para {date_str}: {e}")
 
     return None, "ERROR"
 
 # ---------------------------------------------------------
-# 5. Teclados UI (Principal e Inline para Fechas)
+# 5. Teclados UI
 # ---------------------------------------------------------
 def get_main_reply_keyboard():
     keyboard = [
         [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
         [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🧩 Combinadas EV+")],
-        [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("⚙️ Filtros"), KeyboardButton("📖 Ayuda")]
+        [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("🎯 Top Value +EV"), KeyboardButton("📖 Ayuda")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -207,7 +203,7 @@ def get_date_inline_keyboard(category_code: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------
-# 6. Menús de Selección de Fecha por Categoría
+# 6. Menús de Selección de Fecha
 # ---------------------------------------------------------
 async def prompt_date_selection(update: Update, category_code: str, title: str):
     text = f"🗓️ *Selecciona la jornada para {title}:*"
@@ -218,7 +214,7 @@ async def prompt_date_selection(update: Update, category_code: str, title: str):
     )
 
 # ---------------------------------------------------------
-# 7. Callback Query Handler (Procesa las Fechas Elegidas)
+# 7. Callback Query Handler
 # ---------------------------------------------------------
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -229,22 +225,20 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     offset_days = int(offset_str)
 
     date_str, label = get_target_date_str(offset_days)
-    
     await query.edit_message_text(f"🔄 Consultando partidos para *{label}*...", parse_mode="Markdown")
 
     fixtures, status = await fetch_api_football_fixtures_by_date(date_str)
 
     if status == "NO_API_KEY":
-        await query.edit_message_text("🔑 *API Key no configurada en Render.*", parse_mode="Markdown")
+        await query.edit_message_text("🔑 *Clave de API no configurada.*", parse_mode="Markdown")
         return
     elif status == "QUOTA_EXCEEDED":
-        await query.edit_message_text("⚠️ *Límite de solicitudes de la API alcanzado.*", parse_mode="Markdown")
+        await query.edit_message_text("⚠️ *Límite de la API alcanzado.*", parse_mode="Markdown")
         return
     elif not fixtures:
         await query.edit_message_text(f"ℹ️ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
         return
 
-    # Procesar según la categoría elegida
     if category_code == "cat1x2":
         picks = []
         for fix in fixtures[:5]:
@@ -337,7 +331,60 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(response, parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 8. Router de Botones de Texto
+# 8. Comandos Especiales (Top Value & Ayuda)
+# ---------------------------------------------------------
+async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    loading_msg = await update.message.reply_text("🔄 Filtrando los mejores picks +EV de la jornada...")
+    fixtures, status = await fetch_api_football_fixtures_by_date(get_target_date_str(0)[0])
+    await loading_msg.delete()
+
+    if not fixtures:
+        await update.message.reply_text("ℹ️ *No hay partidos activos para evaluar en este momento.*", parse_mode="Markdown")
+        return
+
+    top_picks = []
+    for fix in fixtures[:3]:
+        teams = fix.get("teams", {})
+        home = teams.get("home", {}).get("name")
+        away = teams.get("away", {}).get("name")
+        match_time = fix.get("fixture", {}).get("date", "")[11:16]
+
+        metrics = calculate_match_metrics(1.80, 1.05)
+        p_home = metrics["p_home"]
+        odds_home = 2.10
+        ev = (p_home * odds_home) - 1.0
+        stake = calculate_kelly_stake(p_home, odds_home)
+
+        top_picks.append(
+            f"🔥 *{home} vs {away}* (`{match_time} HS`)\n"
+            f"   • *Pick:* Victoria {home}\n"
+            f"   • *Cuota:* `{odds_home:.2f}` | *Prob. Modelo:* `{p_home*100:.1f}%`\n"
+            f"   • *Ventaja Matematica (EV):* `+{ev*100:.1f}%` 💎\n"
+            f"   • *Aposta Sugerida:* `{stake}%` de tu banca"
+        )
+
+    response = "🎯 *TOP SELECCIONES CON MAYOR VALOR (+EV) HOY*\n\n" + "\n\n---\n\n".join(top_picks)
+    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📖 *GUÍA DE LECTURA DE PRONÓSTICOS*\n\n"
+        "Aprende a interpretar los datos que entrega **NosticProno**:\n\n"
+        "📊 *1. Cuota (Odds)*\n"
+        "Es la cuota oficial multiplicadora. Por ejemplo, cuota `2.00` equivale a duplicar lo apostado si se acierta.\n\n"
+        "📈 *2. Probabilidad del Modelo (%)*\n"
+        "Es la probabilidad real calculada por la *Distribución de Poisson* analizando goles anotados, recibidos y rendimiento reciente.\n\n"
+        "💡 *3. Valor Esperado (EV+)*\n"
+        "Indica la **ventaja matemática** sobre la casa de apuestas. Si el EV es positivo (ej: `+8.5%`), la apuesta es rentable a largo plazo.\n\n"
+        "🎯 *4. Stake Kelly (%)*\n"
+        "Es el porcentaje **máximo recomendado de tu dinero total (Banca)** para apostar en ese partido, calculado mediante el *Criterio de Kelly* para minimizar riesgos.\n\n"
+        "🚩 *5. Líneas de Córners y Tarjetas*\n"
+        "Muestra la proyección numérica esperada. Si indica *Más de 9.5*, el modelo proyecta que habrán 10 o más saques de esquina."
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+
+# ---------------------------------------------------------
+# 9. Router de Botones de Texto
 # ---------------------------------------------------------
 async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -349,6 +396,8 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await prompt_date_selection(update, "catcorners", "Córners & Tarjetas")
     elif "Combinadas" in text:
         await prompt_date_selection(update, "catcombo", "Combinadas EV+")
+    elif "Top Value" in text:
+        await top_value_command(update, context)
     elif "Estadísticas" in text:
         stats_text = (
             "📊 *Rendimiento Histórico NosticProno*\n\n"
@@ -359,26 +408,11 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             "• *Unidades Ganadas:* `+19.4u`"
         )
         await update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
-    elif "Filtros" in text:
-        filters_text = (
-            "⚙️ *CONFIGURACIÓN DE BÚSQUEDA*\n\n"
-            "• *Proveedor:* API-Football (Direct Feed)\n"
-            "• *Filtro Temporal:* Hoy / Mañana / Pasado Mañana\n"
-            "• *Caché por Fecha:* 15 minutos de persistencia"
-        )
-        await update.message.reply_text(filters_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
     elif "Ayuda" in text:
-        help_text = (
-            "📖 *Guía de Selección de Fechas*\n\n"
-            "1. Toca cualquiera de los botones del menú inferior.\n"
-            "2. Elige entre **Hoy**, **Mañana** o **Pasado Mañana** en la botonera interactiva.\n"
-            "3. El bot consultará los partidos reales programados para esa jornada."
-        )
-        await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+        await help_command(update, context)
 
 # ---------------------------------------------------------
-
-# 9. Handlers de Comandos Básicos
+# 10. Handlers de Comandos Básicos
 # ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
@@ -388,14 +422,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Análisis estadístico y valor (+EV) para *Hoy, Mañana y Pasado Mañana*.\n\n"
         f"👇 *Selecciona un mercado para empezar:*"
     )
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode="Markdown",
-        reply_markup=get_main_reply_keyboard()
-    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 # ---------------------------------------------------------
-# 10. Ejecución Principal
+# 11. Ejecución Principal
 # ---------------------------------------------------------
 def main():
     token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
@@ -405,10 +435,12 @@ def main():
 
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot (Filtro por Fecha Activo)...")
+    logger.info("Inicializando NosticProno Bot...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("top", top_value_command))
     application.add_handler(CallbackQueryHandler(date_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
