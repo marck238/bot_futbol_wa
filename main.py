@@ -3,6 +3,8 @@ import sys
 import math
 import logging
 import threading
+import asyncio
+import time
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import httpx
@@ -55,13 +57,11 @@ def start_health_server():
 # 3. Modelos Matemáticos (Poisson & Kelly)
 # ---------------------------------------------------------
 def poisson_pmf(lmbda: float, k: int) -> float:
-    """Calcula la probabilidad puntual de Poisson."""
     if lmbda <= 0:
         return 0.0
     return (lmbda ** k) * math.exp(-lmbda) / math.factorial(k)
 
 def calculate_match_metrics(home_exp: float = 1.55, away_exp: float = 1.15, max_goals: int = 7):
-    """Calcula probabilidades reales para 1X2, Over/Under y BTTS."""
     p_home, p_draw, p_away = 0.0, 0.0, 0.0
     p_over_25 = 0.0
 
@@ -96,7 +96,6 @@ def calculate_match_metrics(home_exp: float = 1.55, away_exp: float = 1.15, max_
     }
 
 def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_fraction: float = 0.20) -> float:
-    """Calcula la sugerencia de banca con Kelly fraccionado."""
     if decimal_odds <= 1.0 or probability <= 0.0:
         return 0.0
 
@@ -111,10 +110,9 @@ def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_frac
     return round(f_star * bankroll_fraction * 100, 2)
 
 # ---------------------------------------------------------
-# 4. Conexión a The Odds API (Lista Completa de Ligas)
+# 4. Conexión Optimizada con Caché y Asincronismo Paralelo
 # ---------------------------------------------------------
 LEAGUES_TO_SCAN = [
-    # --- Europa (Ligas Principales y Segundas) ---
     "soccer_spain_la_liga",
     "soccer_spain_segunda_division",
     "soccer_epl",
@@ -124,13 +122,9 @@ LEAGUES_TO_SCAN = [
     "soccer_france_ligue_one",
     "soccer_netherlands_eredivisie",
     "soccer_portugal_primeira_liga",
-
-    # --- Torneos Internacionales Europeos ---
     "soccer_uefa_champs_league",
     "soccer_uefa_europa_league",
     "soccer_uefa_europa_conference_league",
-
-    # --- Sudamérica y América ---
     "soccer_conmebol_copa_libertadores",
     "soccer_conmebol_copa_sudamericana",
     "soccer_brazil_campeonato",
@@ -141,31 +135,63 @@ LEAGUES_TO_SCAN = [
     "soccer_usa_mls"
 ]
 
+# Variables globales para sistema de Caché
+_cached_events = []
+_last_fetch_time = 0
+CACHE_TTL_SECONDS = 900  # Guardar resultados durante 15 minutos
+
+async def fetch_league_odds(client: httpx.AsyncClient, sport: str, api_key: str):
+    """Consulta una liga individual de forma asíncrona."""
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={api_key}&regions=eu,us&markets=h2h,totals"
+    try:
+        response = await client.get(url, timeout=6.0)
+        if response.status_code == 200:
+            events = response.json()
+            return events if isinstance(events, list) else []
+        elif response.status_code in (401, 429):
+            logger.warning(f"Respuesta de la API para {sport}: HTTP {response.status_code}")
+            return "QUOTA_EXCEEDED"
+    except Exception as e:
+        logger.error(f"Error consultando {sport}: {e}")
+    return []
+
 async def fetch_odds_api_events():
-    """Obtiene los partidos programados reales desde The Odds API."""
+    """Obtiene eventos optimizando el uso de la API mediante caché y peticiones concurrentes."""
+    global _cached_events, _last_fetch_time
+
     api_key = os.getenv("ODDS_API_KEY")
     if not api_key:
         return None, "NO_API_KEY"
 
+    # Retornar Caché si han pasado menos de 15 minutos
+    current_time = time.time()
+    if _cached_events and (current_time - _last_fetch_time < CACHE_TTL_SECONDS):
+        logger.info("Devolviendo datos desde la memoria caché.")
+        return _cached_events, "OK"
+
     all_events = []
+    quota_exceeded = False
+
     async with httpx.AsyncClient() as client:
-        for sport in LEAGUES_TO_SCAN:
-            url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={api_key}&regions=eu&markets=h2h,totals"
-            try:
-                response = await client.get(url, timeout=5.0)
-                if response.status_code == 200:
-                    events = response.json()
-                    if isinstance(events, list) and len(events) > 0:
-                        all_events.extend(events)
-                elif response.status_code == 401:
-                    return None, "INVALID_KEY"
-            except Exception as e:
-                logger.error(f"Error consultando liga {sport}: {e}")
+        tasks = [fetch_league_odds(client, sport, api_key) for sport in LEAGUES_TO_SCAN]
+        results = await asyncio.gather(*tasks)
+
+        for res in results:
+            if res == "QUOTA_EXCEEDED":
+                quota_exceeded = True
+            elif isinstance(res, list) and len(res) > 0:
+                all_events.extend(res)
+
+    if quota_exceeded and len(all_events) == 0:
+        return None, "QUOTA_EXCEEDED"
+
+    if all_events:
+        _cached_events = all_events
+        _last_fetch_time = current_time
 
     return all_events, "OK"
 
 def parse_match_data(event):
-    """Extrae datos limpios de un evento real obtenido de la API."""
     home = event.get("home_team")
     away = event.get("away_team")
     commence_time = event.get("commence_time")
@@ -211,20 +237,23 @@ def parse_match_data(event):
     }
 
 # ---------------------------------------------------------
-# 5. Avisos Estándar
+# 5. Avisos Claros
 # ---------------------------------------------------------
 MSG_NO_KEY = (
     "🔑 *Clave de API no configurada*\n\n"
-    "Para recibir los partidos y cuotas reales en tiempo real:\n"
-    "1. Ve a tu panel de **Render**.\n"
-    "2. Entra a **Environment Variables**.\n"
-    "3. Añade la variable `ODDS_API_KEY` con tu API Key de *The Odds API*."
+    "Ingresa a tu panel de **Render > Environment Variables** y agrega la variable `ODDS_API_KEY`."
+)
+
+MSG_QUOTA_EXCEEDED = (
+    "⚠️ *Cuota mensual de API agotada*\n\n"
+    "Se ha alcanzado el límite de créditos gratuitos del mes en *The Odds API* (500 solicitudes/mes).\n"
+    "Los datos se actualizarán automáticamente cuando comience el nuevo ciclo de tu clave de API."
 )
 
 MSG_NO_MATCHES = (
-    "ℹ️ *Sin partidos disponibles en este momento*\n\n"
-    "No se encontraron partidos programados con cuotas publicadas en las ligas monitoreadas para las próximas horas.\n"
-    "Por favor, intenta nuevamente más tarde o cuando se acerque la jornada."
+    "ℹ️ *Sin partidos con cuotas activas en este instante*\n\n"
+    "No se encontraron eventos con cuotas publicadas en las 20 ligas en este momento.\n"
+    "Intenta nuevamente más cerca del horario de la jornada."
 )
 
 # ---------------------------------------------------------
@@ -246,19 +275,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         f"👋 ¡Hola, *{user_name}*!\n\n"
         f"Bienvenido a *NosticProno* 🎯\n"
-        f"Análisis en tiempo real de partidos programados hoy utilizando modelos de *Poisson* y *Criterio de Kelly*.\n\n"
+        f"Modelos matemáticos de *Poisson* y *Kelly* sobre datos en tiempo real.\n\n"
         f"Selecciona una categoría del menú inferior para comenzar:"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 async def value_1x2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analiza partidos reales en el Mercado 1X2"""
-    loading_msg = await update.message.reply_text("🔄 Consultando partidos reales programados...")
+    loading_msg = await update.message.reply_text("🔄 Escaneando 20 ligas en tiempo real...")
     events, status = await fetch_odds_api_events()
     await loading_msg.delete()
 
     if status == "NO_API_KEY":
         await update.message.reply_text(MSG_NO_KEY, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+        return
+    elif status == "QUOTA_EXCEEDED":
+        await update.message.reply_text(MSG_QUOTA_EXCEEDED, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
         return
 
     if not events:
@@ -292,13 +323,15 @@ async def value_1x2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 async def goals_btts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analiza partidos reales en Goles y BTTS"""
-    loading_msg = await update.message.reply_text("🔄 Consultando líneas de Goles para partidos reales...")
+    loading_msg = await update.message.reply_text("🔄 Calculando líneas de Goles y BTTS...")
     events, status = await fetch_odds_api_events()
     await loading_msg.delete()
 
     if status == "NO_API_KEY":
         await update.message.reply_text(MSG_NO_KEY, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+        return
+    elif status == "QUOTA_EXCEEDED":
+        await update.message.reply_text(MSG_QUOTA_EXCEEDED, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
         return
 
     if not events:
@@ -333,13 +366,15 @@ async def goals_btts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 async def corners_cards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Proyecta Córners y Tarjetas para partidos reales"""
-    loading_msg = await update.message.reply_text("🔄 Proyectando Córners y Tarjetas para la fecha real...")
+    loading_msg = await update.message.reply_text("🔄 Proyectando Córners y Tarjetas...")
     events, status = await fetch_odds_api_events()
     await loading_msg.delete()
 
     if status == "NO_API_KEY":
         await update.message.reply_text(MSG_NO_KEY, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+        return
+    elif status == "QUOTA_EXCEEDED":
+        await update.message.reply_text(MSG_QUOTA_EXCEEDED, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
         return
 
     if not events:
@@ -368,13 +403,15 @@ async def corners_cards_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 async def combinadas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Genera combinadas EV+ uniendo partidos reales"""
-    loading_msg = await update.message.reply_text("🔄 Evaluando combinaciones con EV+ sobre partidos reales...")
+    loading_msg = await update.message.reply_text("🔄 Evaluando combinaciones con EV+...")
     events, status = await fetch_odds_api_events()
     await loading_msg.delete()
 
     if status == "NO_API_KEY":
         await update.message.reply_text(MSG_NO_KEY, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+        return
+    elif status == "QUOTA_EXCEEDED":
+        await update.message.reply_text(MSG_QUOTA_EXCEEDED, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
         return
 
     valid_matches = []
@@ -387,7 +424,7 @@ async def combinadas_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if len(valid_matches) < 2:
         await update.message.reply_text(
             "ℹ️ *Sin suficientes partidos con cuotas reales activos*\n\n"
-            "Se requieren al menos 2 partidos reales activos en simultáneo con cuotas disponibles para construir una apuesta combinada.",
+            "Se requieren al menos 2 partidos reales activos en simultáneo con cuotas disponibles.",
             parse_mode="Markdown",
             reply_markup=get_main_reply_keyboard()
         )
@@ -435,18 +472,15 @@ async def filters_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *FILTROS ACTIVOS DE APUESTAS*\n\n"
         "• *EV Mínimo:* `+3.0%`\n"
         "• *Fracción Kelly:* `1/5 (Parlays)` | `1/4 (Simples)`\n"
-        "• *Ligas Escaneadas (20 total):*\n"
-        "  - Europa: España (1ª y 2ª), Inglaterra (EPL y Champ), Italia, Alemania, Francia, Países Bajos, Portugal.\n"
-        "  - Copas: Champions, Europa League, Conference League.\n"
-        "  - América: Libertadores, Sudamericana, Brasil, Argentina, Chile, Colombia, México, MLS."
+        "• *Sistema de Caché:* Activo (15 minutos)"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *Guía NosticProno*\n\n"
-        "• Todos los pronósticos provienen exclusivamente de partidos reales consultados en tiempo real.\n"
-        "• Si no hay partidos programados o faltan cuotas en las casas de apuestas, el bot te notificará de inmediato."
+        "• Todos los pronósticos provienen de partidos reales consultados en tiempo real.\n"
+        "• Las peticiones se optimizan mediante caché de 15 min para proteger la cuota mensual."
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
 
@@ -481,7 +515,7 @@ def main():
 
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot con escaner multiliga completo (20 ligas)...")
+    logger.info("Inicializando NosticProno Bot (Con Caché y Peticiones Asíncronas)...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
     application.add_handler(CommandHandler("start", start_command))
