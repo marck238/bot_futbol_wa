@@ -6,6 +6,7 @@ import threading
 import asyncio
 import time
 import hashlib
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import httpx
@@ -30,6 +31,7 @@ from telegram.ext import (
 # ---------------------------------------------------------
 LOCAL_TIMEZONE_NAME = "America/Montevideo"
 UTC_OFFSET_HOURS = -3
+DB_FILE = "users.db"
 
 # ---------------------------------------------------------
 # 1. Configuración de Logging
@@ -41,7 +43,125 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. Servidor HTTP de Salud (Render Port Binding)
+# 2. Base de Datos SQLite (Usuarios y Estadísticas)
+# ---------------------------------------------------------
+def init_db():
+    """Inicializa la tabla de usuarios si no existe."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            role TEXT DEFAULT 'user',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT,
+            bets_count INTEGER DEFAULT 0,
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            profit_units REAL DEFAULT 0.0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_user(telegram_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def register_user(telegram_id: int, username: str, first_name: str, role: str = 'user', is_active: int = 1):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO users (telegram_id, username, first_name, role, is_active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(telegram_id) DO UPDATE SET
+            username = excluded.username,
+            first_name = excluded.first_name
+    ''', (telegram_id, username or "", first_name or "", role, is_active, created_at))
+    conn.commit()
+    conn.close()
+
+def set_user_status(telegram_id: int, is_active: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET is_active = ? WHERE telegram_id = ?", (is_active, telegram_id))
+    rows = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return rows > 0
+
+def delete_user(telegram_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+    rows = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return rows > 0
+
+def get_all_users():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def update_user_stats(telegram_id: int, is_win: bool, units: float = 1.0):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    if is_win:
+        cursor.execute('''
+            UPDATE users 
+            SET bets_count = bets_count + 1, wins = wins + 1, profit_units = profit_units + ?
+            WHERE telegram_id = ?
+        ''', (units, telegram_id))
+    else:
+        cursor.execute('''
+            UPDATE users 
+            SET bets_count = bets_count + 1, losses = losses + 1, profit_units = profit_units - ?
+            WHERE telegram_id = ?
+        ''', (units, telegram_id))
+    conn.commit()
+    conn.close()
+
+def reset_user_stats(telegram_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE users 
+        SET bets_count = 0, wins = 0, losses = 0, profit_units = 0.0
+        WHERE telegram_id = ?
+    ''', (telegram_id,))
+    conn.commit()
+    conn.close()
+
+def is_admin(user_id: int) -> bool:
+    admin_env = os.getenv("ADMIN_ID") or os.getenv("ADMIN_TELEGRAM_ID")
+    if admin_env and str(user_id) == str(admin_env).strip():
+        return True
+    
+    user = get_user(user_id)
+    if user and user.get("role") == "admin":
+        return True
+        
+    all_users = get_all_users()
+    if not all_users:
+        return True  # El primer usuario en interactuar es nombrado Admin si la BD está vacía
+        
+    return False
+
+# ---------------------------------------------------------
+# 3. Servidor HTTP de Salud (Render Port Binding)
 # ---------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -64,16 +184,47 @@ def start_health_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 3. Conversor de Horario a Zona Local (Uruguay)
+# 4. Control de Acceso (Middleware)
+# ---------------------------------------------------------
+async def check_access(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+        
+    user_id = user.id
+    username = user.username or ""
+    first_name = user.first_name or ""
+
+    if is_admin(user_id):
+        register_user(user_id, username, first_name, role='admin', is_active=1)
+        return True
+
+    db_user = get_user(user_id)
+    if not db_user:
+        register_user(user_id, username, first_name, role='user', is_active=0)
+        db_user = get_user(user_id)
+
+    if db_user.get("is_active") != 1:
+        msg = (
+            "⛔ *ACCESO RESTRINGIDO*\n\n"
+            "Tu cuenta no está autorizada para usar **NosticProno**.\n"
+            f"📌 *Tu Telegram ID:* `{user_id}`\n\n"
+            "Envía esta ID al administrador para que habilite tu acceso."
+        )
+        if update.message:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
+        return False
+
+    register_user(user_id, username, first_name, role=db_user.get('role', 'user'), is_active=1)
+    return True
+
+# ---------------------------------------------------------
+# 5. Conversor de Horario a Zona Local (Uruguay)
 # ---------------------------------------------------------
 def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> str:
-    """
-    Formatea la hora del encuentro a HH:MM considerando el timestamp Unix
-    o la hora parseada de la API en formato ISO.
-    """
     fixture_data = fix.get("fixture", {})
-    
-    # 1. Intentar por Timestamp Unix
     ts = fixture_data.get("timestamp")
     if ts:
         try:
@@ -83,7 +234,6 @@ def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> st
         except Exception:
             pass
 
-    # 2. Fallback por texto ISO
     iso_date_str = fixture_data.get("date", "")
     if iso_date_str and "T" in iso_date_str:
         try:
@@ -94,7 +244,7 @@ def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> st
     return "--:--"
 
 # ---------------------------------------------------------
-# 4. Modelos Matemáticos (Poisson & Kelly)
+# 6. Modelos Matemáticos (Poisson & Kelly)
 # ---------------------------------------------------------
 def poisson_pmf(lmbda: float, k: int) -> float:
     if lmbda <= 0:
@@ -183,10 +333,10 @@ def generate_fixture_analytics(fix: dict):
     }
 
 # ---------------------------------------------------------
-# 5. Integración API-Football con Caché por Fecha
+# 7. API-Football Integration
 # ---------------------------------------------------------
 _cached_fixtures = {}
-CACHE_TTL_SECONDS = 900  # 15 minutos de caché
+CACHE_TTL_SECONDS = 900
 
 def get_target_date_str(offset_days: int) -> tuple[str, str]:
     tz_uy = timezone(timedelta(hours=UTC_OFFSET_HOURS))
@@ -214,7 +364,6 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     if date_str in _cached_fixtures:
         cache_entry = _cached_fixtures[date_str]
         if current_time - cache_entry["timestamp"] < CACHE_TTL_SECONDS:
-            logger.info(f"Devolviendo caché para {date_str}.")
             return cache_entry["data"], "OK"
 
     url = f"https://v3.football.api-sports.io/fixtures?date={date_str}&timezone={LOCAL_TIMEZONE_NAME}"
@@ -249,14 +398,16 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     return None, "ERROR"
 
 # ---------------------------------------------------------
-# 6. Teclados de la Interfaz (UI)
+# 8. Teclados de la Interfaz (UI)
 # ---------------------------------------------------------
-def get_main_reply_keyboard():
+def get_main_reply_keyboard(user_id: int = None):
     keyboard = [
         [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
         [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🧩 Combinadas EV+")],
         [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("🎯 Top Value +EV"), KeyboardButton("📖 Ayuda")]
     ]
+    if user_id and is_admin(user_id):
+        keyboard.append([KeyboardButton("⚙️ Panel Admin")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_date_inline_keyboard(category_code: str):
@@ -274,22 +425,171 @@ def get_date_inline_keyboard(category_code: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------
-# 7. Selección de Jornada
+# 9. Comandos de Administración
 # ---------------------------------------------------------
-async def prompt_date_selection(update: Update, category_code: str, title: str):
-    text = f"🗓️ *Selecciona la jornada para {title}:*"
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=get_date_inline_keyboard(category_code)
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ Este comando es exclusivo para administradores.")
+        return
+
+    admin_text = (
+        "⚙️ *PANEL DE ADMINISTRACIÓN - NOSTICPRONO*\n\n"
+        "Comandos de gestión rápida:\n"
+        "• `/usuarios` - Ver lista completa de usuarios\n"
+        "• `/agregar <ID>` - Habilitar un usuario\n"
+        "• `/bloquear <ID>` - Deshabilitar un usuario\n"
+        "• `/activar <ID>` - Reactivar usuario\n"
+        "• `/eliminar <ID>` - Borrar usuario\n"
     )
 
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Lista de Usuarios", callback_data="adm_list")],
+        [InlineKeyboardButton("📊 Estadísticas Globales", callback_data="adm_stats")]
+    ])
+    await update.message.reply_text(admin_text, parse_mode="Markdown", reply_markup=keyboard)
+
+async def usuarios_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    if not is_admin(update.effective_user.id):
+        return
+
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("ℹ️ No hay usuarios registrados.")
+        return
+
+    lines = ["📋 *USUARIOS REGISTRADOS:*\n"]
+    for u in users:
+        status_icon = "🟢 Activo" if u["is_active"] == 1 else "🔴 Bloqueado"
+        role_icon = "👑 Admin" if u["role"] == "admin" else "👤 User"
+        uname = f"@{u['username']}" if u['username'] else u['first_name']
+        lines.append(
+            f"• `{u['telegram_id']}` | {uname} | {role_icon} | {status_icon}\n"
+            f"  └ Apuestas: `{u['bets_count']}` | P/L: `{u['profit_units']:+.1f}u`"
+        )
+
+    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+
+async def agregar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update) or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("⚠ Uso: `/agregar <TELEGRAM_ID>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+        register_user(target_id, "", "Usuario", role='user', is_active=1)
+        await update.message.reply_text(f"✅ Usuario `{target_id}` habilitado correctamente.", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+
+async def bloquear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update) or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("⚠ Uso: `/bloquear <TELEGRAM_ID>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if set_user_status(target_id, 0):
+            await update.message.reply_text(f"🔴 Usuario `{target_id}` bloqueado.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"⚠ Usuario `{target_id}` no encontrado.")
+    except ValueError:
+        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+
+async def activar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update) or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("⚠ Uso: `/activar <TELEGRAM_ID>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if set_user_status(target_id, 1):
+            await update.message.reply_text(f"🟢 Usuario `{target_id}` reactivado.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"⚠ Usuario `{target_id}` no encontrado.")
+    except ValueError:
+        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+
+async def eliminar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update) or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("⚠ Uso: `/eliminar <TELEGRAM_ID>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if delete_user(target_id):
+            await update.message.reply_text(f"❌ Usuario `{target_id}` eliminado de la base de datos.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"⚠ Usuario `{target_id}` no encontrado.")
+    except ValueError:
+        await update.message.reply_text("⚠ El ID debe ser un número entero.")
+
 # ---------------------------------------------------------
-# 8. Procesador de Consultas e Inline Buttons
+# 10. Callback Query Handler (Admin & Usuarios)
+# ---------------------------------------------------------
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "adm_list":
+        users = get_all_users()
+        lines = ["📋 *LISTA DE USUARIOS:*\n"]
+        for u in users:
+            status = "🟢 Activo" if u["is_active"] == 1 else "🔴 Bloqueado"
+            uname = f"@{u['username']}" if u['username'] else u['first_name']
+            lines.append(f"• `{u['telegram_id']}` | {uname} | {status}")
+        await query.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif data == "adm_stats":
+        users = get_all_users()
+        total_users = len(users)
+        active_users = sum(1 for u in users if u["is_active"] == 1)
+        total_bets = sum(u["bets_count"] for u in users)
+        total_profit = sum(u["profit_units"] for u in users)
+
+        stats_msg = (
+            "📊 *ESTADÍSTICAS GLOBALES DEL BOT*\n\n"
+            f"• *Usuarios Totales:* `{total_users}`\n"
+            f"• *Usuarios Activos:* `{active_users}`\n"
+            f"• *Apuestas Registradas:* `{total_bets}`\n"
+            f"• *Beneficio Neto Total:* `{total_profit:+.1f}u`"
+        )
+        await query.message.reply_text(stats_msg, parse_mode="Markdown")
+
+    elif data == "stat_win":
+        update_user_stats(query.from_user.id, is_win=True, units=1.0)
+        await query.edit_message_text("✅ *Acierto registrado (+1.0u).* Usa '📊 Mis Estadísticas' para ver el balance actualizado.", parse_mode="Markdown")
+
+    elif data == "stat_loss":
+        update_user_stats(query.from_user.id, is_win=False, units=1.0)
+        await query.edit_message_text("❌ *Fallo registrado (-1.0u).* Usa '📊 Mis Estadísticas' para ver el balance actualizado.", parse_mode="Markdown")
+
+    elif data == "stat_reset":
+        reset_user_stats(query.from_user.id)
+        await query.edit_message_text("🔄 *Tus estadísticas han sido reiniciadas a 0.*", parse_mode="Markdown")
+
+# ---------------------------------------------------------
+# 11. Procesador de Fechas / Partidos
 # ---------------------------------------------------------
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    if not await check_access(update):
+        return
 
     data = query.data
     category_code, offset_str = data.rsplit("_", 1)
@@ -310,13 +610,9 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(f"ℹ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
         return
 
-    # --- FILTRADO Y ORDENAMIENTO CRONOLÓGICO ---
     now_ts = int(time.time())
-
-    # Ordenar cronológicamente por horario de inicio
     fixtures.sort(key=lambda f: f.get("fixture", {}).get("timestamp", 0))
 
-    # Para HOY: filtrar únicamente encuentros pendientes (que aún no hayan empezado)
     if offset_days == 0:
         valid_fixtures = [
             f for f in fixtures
@@ -325,7 +621,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         if not valid_fixtures:
             await query.edit_message_text(
-                f"ℹ *No quedan más partidos pendientes por disputarse en lo que resta de {label}.*",
+                f"ℹ *No quedan partidos pendientes por disputarse en {label}.*",
                 parse_mode="Markdown"
             )
             return
@@ -346,7 +642,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             odds_home = analytics["odds_home"]
             ev = (p_home * odds_home) - 1.0
             stake = calculate_kelly_stake(p_home, odds_home)
-
             ev_display = f"+{ev*100:.1f}%" if ev > 0 else f"{ev*100:.1f}%"
 
             picks.append(
@@ -417,7 +712,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             combined_prob = prob1 * prob2
             ev = (combined_prob * total_odds) - 1.0
             stake = calculate_kelly_stake(combined_prob, total_odds, bankroll_fraction=0.15)
-
             ev_display = f"+{ev*100:.1f}%" if ev > 0 else f"{ev*100:.1f}%"
 
             response = (
@@ -435,9 +729,83 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(response, parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 9. Comandos Especiales (Top Value & Ayuda)
+# 12. Sección "Mis Estadísticas" de Usuario
 # ---------------------------------------------------------
+async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+
+    user_id = update.effective_user.id
+    u = get_user(user_id)
+    if not u:
+        await update.message.reply_text("⚠ No se encontraron registros de usuario.")
+        return
+
+    total = u["bets_count"]
+    wins = u["wins"]
+    losses = u["losses"]
+    profit = u["profit_units"]
+    win_rate = (wins / total * 100) if total > 0 else 0.0
+
+    stats_msg = (
+        f"📊 *MIS ESTADÍSTICAS PERSONALIZADAS*\n\n"
+        f"👤 *Usuario:* {u['first_name']} (`{user_id}`)\n"
+        f"📅 *Miembro desde:* `{u['created_at'][:10]}`\n\n"
+        f"• *Apuestas Registradas:* `{total}`\n"
+        f"• *Aciertos (Ganadas):* `{wins}`\n"
+        f"• *Fallos (Perdidas):* `{losses}`\n"
+        f"• *Win Rate:* `{win_rate:.1f}%`\n"
+        f"• *Beneficio Total:* `{profit:+.2f}u`\n\n"
+        "👇 *Registra tus resultados para mantener tu historial:* "
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Registrar Ganada (+1u)", callback_data="stat_win"),
+            InlineKeyboardButton("❌ Registrar Perdida (-1u)", callback_data="stat_loss")
+        ],
+        [InlineKeyboardButton("🔄 Reiniciar Mis Estadísticas", callback_data="stat_reset")]
+    ])
+
+    await update.message.reply_text(stats_msg, parse_mode="Markdown", reply_markup=keyboard)
+
+# ---------------------------------------------------------
+# 13. Router de Menú Principal
+# ---------------------------------------------------------
+async def prompt_date_selection(update: Update, category_code: str, title: str):
+    text = f"🗓️ *Selecciona la jornada para {title}:*"
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_date_inline_keyboard(category_code)
+    )
+
+async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+
+    text = update.message.text
+    if "1X2 / Ganador" in text:
+        await prompt_date_selection(update, "cat1x2", "1X2 / Ganador")
+    elif "Goles & BTTS" in text:
+        await prompt_date_selection(update, "catgoals", "Goles & BTTS")
+    elif "Córners" in text:
+        await prompt_date_selection(update, "catcorners", "Córners & Tarjetas")
+    elif "Combinadas" in text:
+        await prompt_date_selection(update, "catcombo", "Combinadas EV+")
+    elif "Top Value" in text:
+        await top_value_command(update, context)
+    elif "Mis Estadísticas" in text:
+        await user_stats_command(update, context)
+    elif "Panel Admin" in text:
+        await admin_command(update, context)
+    elif "Ayuda" in text:
+        await help_command(update, context)
+
 async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+
     loading_msg = await update.message.reply_text("🔄 Filtrando los mejores picks +EV de la jornada...")
     fixtures, status = await fetch_api_football_fixtures_by_date(get_target_date_str(0)[0])
     await loading_msg.delete()
@@ -480,60 +848,28 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     response = "🎯 *TOP SELECCIONES CON MAYOR VALOR (+EV) HOY*\n\n" + "\n\n---\n\n".join(top_picks)
-    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard(update.effective_user.id))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+
     help_text = (
         "📖 *GUÍA DE LECTURA DE PRONÓSTICOS*\n\n"
-        "Aprende a interpretar los datos que entrega **NosticProno**:\n\n"
-        "📊 *1. Cuota (Odds)*\n"
-        "Es la cuota oficial multiplicadora. Por ejemplo, cuota `2.00` equivale a duplicar lo apostado si se acierta.\n\n"
-        "📈 *2. Probabilidad del Modelo (%)*\n"
-        "Es la probabilidad real calculada por la *Distribución de Poisson* analizando goles anotados, recibidos y rendimiento reciente.\n\n"
-        "💡 *3. Valor Esperado (EV+)*\n"
-        "Indica la **ventaja matemática** sobre la casa de apuestas. Si el EV es positivo (ej: `+8.5%`), la apuesta es rentable a largo plazo.\n\n"
-        "🎯 *4. Stake Kelly (%)*\n"
-        "Es el porcentaje **máximo recomendado de tu dinero total (Banca)** para apostar en ese partido, calculated mediante el *Criterio de Kelly* para minimizar riesgos.\n\n"
-        "🚩 *5. Líneas de Córners y Tarjetas*\n"
-        "Muestra la proyección numérica esperada. Si indica *Más de 9.5*, el modelo proyecta que habrán 10 o más saques de esquina."
+        "Aprende a interpretar los datos de **NosticProno**:\n\n"
+        "📊 *1. Cuota (Odds):* Multiplicador oficial.\n"
+        "📈 *2. Probabilidad del Modelo (%):* Probabilidad real estimada mediante Distribución de Poisson.\n"
+        "💡 *3. Valor Esperado (EV+):* Ventaja matemática sobre la casa.\n"
+        "🎯 *4. Stake Kelly (%):* Porcentaje sugerido de tu banca para apostar.\n"
+        "🚩 *5. Córners / Tarjetas:* Proyección numérica esperada."
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+    await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard(update.effective_user.id))
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Error no capturado durante el procesamiento:", exc_info=context.error)
-
-# ---------------------------------------------------------
-# 10. Manejador de Botones de Texto
-# ---------------------------------------------------------
-async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if "1X2 / Ganador" in text:
-        await prompt_date_selection(update, "cat1x2", "1X2 / Ganador")
-    elif "Goles & BTTS" in text:
-        await prompt_date_selection(update, "catgoals", "Goles & BTTS")
-    elif "Córners" in text:
-        await prompt_date_selection(update, "catcorners", "Córners & Tarjetas")
-    elif "Combinadas" in text:
-        await prompt_date_selection(update, "catcombo", "Combinadas EV+")
-    elif "Top Value" in text:
-        await top_value_command(update, context)
-    elif "Estadísticas" in text:
-        stats_text = (
-            "📊 *Rendimiento Histórico NosticProno*\n\n"
-            "• *Picks Analizados:* `162`\n"
-            "• *Aciertos:* `95` | *Fallos:* `67`\n"
-            "• *Win Rate:* `58.6%`\n"
-            "• *Yield / ROI:* `+9.1%`\n"
-            "• *Unidades Ganadas:* `+19.4u`"
-        )
-        await update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
-    elif "Ayuda" in text:
-        await help_command(update, context)
-
-# ---------------------------------------------------------
-# 11. Comando de Inicio
-# ---------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await check_access(update):
+        return
+
     user_name = update.effective_user.first_name
     welcome_text = (
         f"👋 *¡Hola, {user_name}!*\n\n"
@@ -541,10 +877,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Análisis estadístico y valor (+EV) para *Hoy, Mañana y Pasado Mañana*.\n\n"
         f"👇 *Selecciona un mercado para empezar:*"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard())
+    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard(user_id))
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Error no capturado:", exc_info=context.error)
 
 # ---------------------------------------------------------
-# 12. Punto de Entrada Principal (Main)
+# 14. Punto de Entrada Principal (Main)
 # ---------------------------------------------------------
 def main():
     token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
@@ -552,15 +891,29 @@ def main():
         logger.error("Error crítico: TELEGRAM_BOT_TOKEN no configurado.")
         sys.exit(1)
 
+    init_db()
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot...")
+    logger.info("Inicializando NosticProno Bot con sistema de usuarios...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
+    # Comandos Usuario / General
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", top_value_command))
-    application.add_handler(CallbackQueryHandler(date_callback_handler))
+    application.add_handler(CommandHandler("stats", user_stats_command))
+
+    # Comandos Administrador
+    application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("usuarios", usuarios_command))
+    application.add_handler(CommandHandler("agregar", agregar_command))
+    application.add_handler(CommandHandler("bloquear", bloquear_command))
+    application.add_handler(CommandHandler("activar", activar_command))
+    application.add_handler(CommandHandler("eliminar", eliminar_command))
+
+    # Callbacks & Mensajes
+    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(adm_|stat_)"))
+    application.add_handler(CallbackQueryHandler(date_callback_handler, pattern="^cat"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
     application.add_error_handler(error_handler)
