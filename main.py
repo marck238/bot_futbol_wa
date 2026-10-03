@@ -101,6 +101,13 @@ def init_db():
                 profit_units DOUBLE PRECISION DEFAULT 0.0
             )
         ''')
+        # Migración segura por si la tabla ya existía sin columnas
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(255);")
+            cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(255);")
+        except Exception:
+            conn.rollback()
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_picks (
                 id SERIAL PRIMARY KEY,
@@ -1293,7 +1300,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode="Markdown"
             )
         else:
-            # Seleccionar dinámicamente de 2 a 4 partidos para la combinada mixta
             num_legs = min(len(target_fixtures), 4)
             combo_legs = []
             total_odds = 1.0
@@ -1305,7 +1311,6 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 ta = fx.get("teams", {}).get("away", {}).get("name")
                 an = generate_fixture_analytics(fx)
                 
-                # Asignación mixta de mercados basada en el mayor EV o probabilidad de cada partido
                 seed_val = int(fx.get("fixture", {}).get("id", 0)) % 3
                 if seed_val == 0:
                     sel_name = f"Victoria Local ({th})"
