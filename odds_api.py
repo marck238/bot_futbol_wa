@@ -4,11 +4,12 @@ import asyncio
 import httpx
 from datetime import datetime, timezone, timedelta
 import logging
+from typing import Optional, List, Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-LOCAL_TZ = timezone(timedelta(hours=-3)) # Uruguay / Argentina (UTC-3)
+LOCAL_TZ = timezone(timedelta(hours=-3))  # Uruguay / Argentina (UTC-3)
 
 DEFAULT_SOCCER_LEAGUES = [
     "soccer_epl",
@@ -22,12 +23,14 @@ DEFAULT_SOCCER_LEAGUES = [
     "soccer_brazil_campeonato"
 ]
 
+
 def poisson_pmf(k: int, lamb: float) -> float:
     if lamb <= 0:
         return 1.0 if k == 0 else 0.0
     return (math.pow(lamb, k) * math.exp(-lamb)) / math.factorial(k)
 
-def calculate_poisson_probabilities(home_exp: float, away_exp: float):
+
+def calculate_poisson_probabilities(home_exp: float, away_exp: float) -> Dict[str, float]:
     scores = {}
     prob_home = 0.0
     prob_draw = 0.0
@@ -62,6 +65,7 @@ def calculate_poisson_probabilities(home_exp: float, away_exp: float):
         "Over 3.5 Goles": round(prob_over_3_5 * 100, 2)
     }
 
+
 def calculate_ev(odds: float, win_probability_pct: float) -> float:
     p = win_probability_pct / 100.0
     if odds <= 1.0 or p <= 0:
@@ -69,7 +73,8 @@ def calculate_ev(odds: float, win_probability_pct: float) -> float:
     ev = (p * (odds - 1.0) - (1.0 - p)) * 100.0
     return round(ev, 2)
 
-def calculate_kelly_stake(odds: float, win_probability_pct: float, bankroll: float = 1000.0, fraction: float = 0.25) -> dict:
+
+def calculate_kelly_stake(odds: float, win_probability_pct: float, bankroll: float = 1000.0, fraction: float = 0.25) -> Dict[str, float]:
     p = win_probability_pct / 100.0
     b = odds - 1.0
     if b <= 0 or p <= 0:
@@ -78,14 +83,14 @@ def calculate_kelly_stake(odds: float, win_probability_pct: float, bankroll: flo
     f_star = (b * p - q) / b
     if f_star <= 0:
         return {"stake_pct": 0.0, "amount": 0.0}
-    
+
     f_adjusted = f_star * fraction
     stake_pct = min(f_adjusted * 100.0, 5.0)
     amount = round((stake_pct / 100.0) * bankroll, 2)
     return {"stake_pct": round(stake_pct, 2), "amount": amount}
 
-async def fetch_active_soccer_sports(client: httpx.AsyncClient, api_key: str) -> tuple[list[str], str | None]:
-    """Obtiene ligas de fútbol activas desde /v4/sports (0 créditos)."""
+
+async def fetch_active_soccer_sports(client: httpx.AsyncClient, api_key: str) -> Tuple[List[str], Optional[str]]:
     url = f"https://api.the-odds-api.com/v4/sports/?apiKey={api_key}"
     try:
         resp = await client.get(url, timeout=10.0)
@@ -95,10 +100,10 @@ async def fetch_active_soccer_sports(client: httpx.AsyncClient, api_key: str) ->
             return [], "QUOTA_EXCEEDED"
         if resp.status_code != 200:
             return DEFAULT_SOCCER_LEAGUES, None
-        
+
         sports = resp.json()
         active_soccer = [
-            s["key"] for s in sports 
+            s["key"] for s in sports
             if s.get("active") is True and (s.get("group") == "Soccer" or s.get("key", "").startswith("soccer_"))
         ]
         return active_soccer if active_soccer else DEFAULT_SOCCER_LEAGUES, None
@@ -106,7 +111,8 @@ async def fetch_active_soccer_sports(client: httpx.AsyncClient, api_key: str) ->
         logger.error(f"Error al obtener ligas activas: {e}")
         return DEFAULT_SOCCER_LEAGUES, None
 
-async def fetch_odds_for_sport(client: httpx.AsyncClient, sport_key: str, api_key: str) -> tuple[list[dict], str | None]:
+
+async def fetch_odds_for_sport(client: httpx.AsyncClient, sport_key: str, api_key: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
     params = {
         "apiKey": api_key,
@@ -128,19 +134,19 @@ async def fetch_odds_for_sport(client: httpx.AsyncClient, sport_key: str, api_ke
         logger.error(f"Error al obtener cuotas de {sport_key}: {e}")
         return [], None
 
+
 async def get_upcoming_ev_picks(
-    hours: int | None = None,
-    days_offset: int | None = None,
+    hours: Optional[int] = None,
+    days_offset: Optional[int] = None,
     is_weekend: bool = False,
     min_ev_filter: float = 0.0
-) -> dict:
+) -> Dict[str, Any]:
     if not ODDS_API_KEY:
-        return {"status": "NO_API_KEY", "message": "No se encontró ODDS_API_KEY en las variables de entorno."}
+        return {"status": "NO_API_KEY", "data": []}
 
     now = datetime.now(timezone.utc)
-    
-    # Configuración de rangos de tiempo
-    if hours:
+
+    if hours is not None:
         time_start = now - timedelta(minutes=15)
         time_end = now + timedelta(hours=hours)
     elif days_offset is not None:
@@ -172,7 +178,6 @@ async def get_upcoming_ev_picks(
             return {"status": err, "data": []}
 
         leagues_to_query = active_leagues[:12]
-
         tasks = [fetch_odds_for_sport(client, league, ODDS_API_KEY) for league in leagues_to_query]
         results = await asyncio.gather(*tasks)
 
@@ -292,3 +297,52 @@ async def get_upcoming_ev_picks(
 
     processed_picks.sort(key=lambda x: x["ev"], reverse=True)
     return {"status": "SUCCESS", "data": processed_picks}
+
+
+async def get_best_parlays(hours: Optional[int] = None) -> Dict[str, Any]:
+    single_res = await get_upcoming_ev_picks(hours=hours, min_ev_filter=-1.0)
+
+    if single_res["status"] != "SUCCESS":
+        return {"status": single_res["status"], "parlay": None}
+
+    picks = single_res.get("data", [])
+    if len(picks) < 2:
+        return {"status": "SUCCESS", "parlay": None}
+
+    unique_picks = []
+    seen_matches = set()
+    for p in sorted(picks, key=lambda x: x["ev"], reverse=True):
+        if p["match"] not in seen_matches:
+            seen_matches.add(p["match"])
+            unique_picks.append(p)
+        if len(unique_picks) == 3:
+            break
+
+    if len(unique_picks) < 2:
+        return {"status": "SUCCESS", "parlay": None}
+
+    total_odd = 1.0
+    total_prob = 1.0
+
+    for p in unique_picks:
+        total_odd *= p["odd"]
+        total_prob *= (p["prob"] / 100.0)
+
+    total_ev = ((total_prob * total_odd) - 1.0) * 100.0
+
+    b = total_odd
+    p = total_prob
+    raw_kelly = ((p * b - 1.0) / (b - 1.0)) * 100.0 if b > 1.0 else 0.0
+    conservative_stake = max(0.5, round(raw_kelly / 8.0, 2)) if total_ev > 0 else 0.5
+    recommended_stake = min(conservative_stake, 2.0)
+
+    parlay_data = {
+        "legs_count": len(unique_picks),
+        "legs": unique_picks,
+        "total_odd": round(total_odd, 2),
+        "total_prob_pct": round(total_prob * 100, 2),
+        "total_ev": round(total_ev, 2),
+        "recommended_stake_pct": recommended_stake
+    }
+
+    return {"status": "SUCCESS", "parlay": parlay_data}

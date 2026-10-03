@@ -4,3 +4,5 @@ python-telegram-bot
 sqlalchemy
 asyncpg
 greenlet
+python-telegram-bot>=20.0
+httpx>=0.24.0

@@ -1,5 +1,6 @@
-import os
+﻿import os
 import logging
+from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,17 +10,14 @@ from telegram.ext import (
 )
 from odds_api import get_upcoming_ev_picks, get_best_parlays
 
-# Configuración de Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Tokens desde variables de entorno
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-# Keyboards
 main_keyboard = InlineKeyboardMarkup([
     [
         InlineKeyboardButton("⏳ Próximas 4 Hs", callback_data="hours_4"),
@@ -41,31 +39,24 @@ back_keyboard = InlineKeyboardMarkup([
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start - Envía el menú principal."""
     user = update.effective_user
     welcome_text = (
         f"👋 ¡Hola, <b>{user.first_name}</b>!\n\n"
         "🤖 Bienvenid@ a tu bot de <b>Pronósticos de Valor Esperado (EV+)</b>.\n\n"
-        "Selecciona una opción del menú para consultar los mejores pronósticos "
-        "calculados con el modelo cuantitativo de Poisson y cuotas en tiempo real:"
+        "Selecciona una opción del menú para consultar los mejores pronósticos:"
     )
     if update.message:
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode="HTML",
-            reply_markup=main_keyboard
-        )
+        await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=main_keyboard)
 
 
 async def render_predictions(
     query,
     title: str,
-    hours: int | None = None,
-    days_offset: int | None = None,
+    hours: Optional[int] = None,
+    days_offset: Optional[int] = None,
     is_weekend: bool = False,
     min_ev_filter: float = 0.0
 ):
-    """Procesa y renderiza las predicciones de la API o muestra mensajes de error diagnósticos."""
     await query.answer()
 
     api_res = await get_upcoming_ev_picks(
@@ -78,29 +69,17 @@ async def render_predictions(
     status = api_res.get("status")
 
     if status == "NO_API_KEY":
-        msg = (
-            "❌ <b>API Key No Configurada</b>\n\n"
-            "No se encontró la variable <code>ODDS_API_KEY</code> en Render.\n\n"
-            "👉 <b>Solución:</b> Ve a Render > Environment Variables y agrega <code>ODDS_API_KEY</code> con tu clave."
-        )
+        msg = "❌ <b>API Key No Configurada en Render.</b>"
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
         return
 
     if status == "INVALID_KEY":
-        msg = (
-            "❌ <b>API Key Inválida</b>\n\n"
-            "La clave de API ingresada no es válida o ha caducado.\n\n"
-            "👉 <b>Solución:</b> Revisa tu clave en https://the-odds-api.com y actualízala en Render."
-        )
+        msg = "❌ <b>API Key Inválida en The Odds API.</b>"
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
         return
 
     if status == "QUOTA_EXCEEDED":
-        msg = (
-            "⚠️️ <b>Límite de API Alcanzado</b>\n\n"
-            "Se ha agotado el cupo mensual gratuito (500 peticiones) de The Odds API.\n\n"
-            "👉 <b>Solución:</b> La cuota se reinicia al inicio de cada mes o puedes registrar otra API Key gratuita."
-        )
+        msg = "⚠️ <b>Límite mensual alcanzado en The Odds API.</b>"
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
         return
 
@@ -129,14 +108,13 @@ async def render_predictions(
 
 
 async def render_parlay(query):
-    """Genera y renderiza combinadas calculando EV compuesto."""
     await query.answer()
 
     res = await get_best_parlays(hours=48)
     status = res.get("status")
 
-    if status == "NO_API_KEY":
-        msg = "❌ <b>API Key No Configurada en Render.</b>"
+    if status != "SUCCESS":
+        msg = f"⚠️ <b>Error al consultar cuotas ({status})</b>"
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=back_keyboard)
         return
 
@@ -172,7 +150,6 @@ async def render_parlay(query):
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejador global de eventos de botones en Telegram."""
     query = update.callback_query
     data = query.data
 
