@@ -11,6 +11,15 @@ import re
 from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import httpx
+
+# Conector opcional para PostgreSQL
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
+
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -35,7 +44,7 @@ UTC_OFFSET_HOURS = -3
 DB_FILE = "users.db"
 
 # ---------------------------------------------------------
-# 1. Configuración de Logging
+# 1. Logging
 # ---------------------------------------------------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -44,18 +53,98 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# 2. Funciones Auxiliares de Limpieza y Parseo
+# 2. Capa de Base de Datos Híbrida (PostgreSQL / SQLite)
 # ---------------------------------------------------------
+def get_db_connection():
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and HAS_POSTGRES:
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+        conn = psycopg2.connect(db_url)
+        return conn, "postgres"
+    else:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        return conn, "sqlite"
+
+def init_db():
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+
+    if db_type == "postgres":
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE,
+                email VARCHAR(255) UNIQUE,
+                phone VARCHAR(100) UNIQUE,
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                role VARCHAR(50) DEFAULT 'user',
+                is_active INT DEFAULT 1,
+                created_at VARCHAR(100),
+                bets_count INT DEFAULT 0,
+                wins INT DEFAULT 0,
+                losses INT DEFAULT 0,
+                profit_units DOUBLE PRECISION DEFAULT 0.0
+            );
+
+            CREATE TABLE IF NOT EXISTS user_picks (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT,
+                fixture_id INT,
+                fixture_name VARCHAR(255),
+                market_type VARCHAR(50),
+                selection VARCHAR(100),
+                odds DOUBLE PRECISION,
+                stake DOUBLE PRECISION,
+                status VARCHAR(50) DEFAULT 'PENDING',
+                created_at VARCHAR(100),
+                settled_at VARCHAR(100)
+            );
+        ''')
+    else:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER UNIQUE,
+                email TEXT UNIQUE,
+                phone TEXT UNIQUE,
+                username TEXT,
+                first_name TEXT,
+                role TEXT DEFAULT 'user',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT,
+                bets_count INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                profit_units REAL DEFAULT 0.0
+            );
+
+            CREATE TABLE IF NOT EXISTS user_picks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER,
+                fixture_id INTEGER,
+                fixture_name TEXT,
+                market_type TEXT,
+                selection TEXT,
+                odds REAL,
+                stake REAL,
+                status TEXT DEFAULT 'PENDING',
+                created_at TEXT,
+                settled_at TEXT
+            );
+        ''')
+
+    conn.commit()
+    conn.close()
+
 def clean_phone(phone_str: str) -> str:
-    """Extrae únicamente los dígitos de una cadena."""
     if not phone_str:
         return ""
     return re.sub(r'\D', '', phone_str)
 
 def parse_identifier_type(identifier: str):
-    """
-    Determina si la entrada es Email, Teléfono o Telegram ID de forma precisa.
-    """
     s = identifier.strip()
     if "@" in s:
         return "email", s.lower()
@@ -69,134 +158,131 @@ def parse_identifier_type(identifier: str):
             return "phone", cleaned
         return "unknown", s
 
-# ---------------------------------------------------------
-# 3. Base de Datos SQLite (Usuarios, Permisos y Estadísticas)
-# ---------------------------------------------------------
-def init_db():
-    """Inicializa la base de datos y migra columnas si es necesario."""
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE,
-            email TEXT UNIQUE,
-            phone TEXT UNIQUE,
-            username TEXT,
-            first_name TEXT,
-            role TEXT DEFAULT 'user',
-            is_active INTEGER DEFAULT 1,
-            created_at TEXT,
-            bets_count INTEGER DEFAULT 0,
-            wins INTEGER DEFAULT 0,
-            losses INTEGER DEFAULT 0,
-            profit_units REAL DEFAULT 0.0
-        )
-    ''')
-    
-    cursor.execute("PRAGMA table_info(users)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if "email" not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
-    if "phone" not in columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN phone TEXT")
-        
-    conn.commit()
-    conn.close()
-
 def get_user_by_telegram_id(telegram_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+    ph = "%s" if db_type == "postgres" else "?"
+    cursor.execute(f"SELECT * FROM users WHERE telegram_id = {ph}", (telegram_id,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    if db_type == "postgres":
+        cols = [desc[0] for desc in cursor.description]
+        return dict(zip(cols, row))
+    return dict(row)
 
 def get_user_by_email(email_str: str):
     if not email_str:
         return None
     target = email_str.strip().lower()
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE LOWER(email) = ?", (target,))
+    ph = "%s" if db_type == "postgres" else "?"
+    cursor.execute(f"SELECT * FROM users WHERE LOWER(email) = {ph}", (target,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    if db_type == "postgres":
+        cols = [desc[0] for desc in cursor.description]
+        return dict(zip(cols, row))
+    return dict(row)
 
 def get_user_by_phone(phone_str: str):
     target = clean_phone(phone_str)
     if not target:
         return None
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE phone IS NOT NULL AND phone != ''")
     rows = cursor.fetchall()
     conn.close()
+    
     for r in rows:
-        cleaned_r = clean_phone(r['phone'])
+        if db_type == "postgres":
+            cols = [desc[0] for desc in cursor.description]
+            r_dict = dict(zip(cols, r))
+        else:
+            r_dict = dict(r)
+        
+        cleaned_r = clean_phone(r_dict['phone'])
         if cleaned_r == target or (len(target) >= 8 and target in cleaned_r):
-            return dict(r)
+            return r_dict
     return None
 
 def add_or_update_user_permission(identifier: str, is_active: int = 1, role: str = 'user'):
-    """Agrega o habilita un usuario según Email, Teléfono o Telegram ID."""
-    conn = sqlite3.connect(DB_FILE)
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     id_type, val = parse_identifier_type(identifier)
 
     if id_type == "email":
-        cursor.execute('''
-            INSERT INTO users (email, role, is_active, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(email) DO UPDATE SET is_active = excluded.is_active
-        ''', (val, role, is_active, created_at))
+        if db_type == "postgres":
+            cursor.execute('''
+                INSERT INTO users (email, role, is_active, created_at) VALUES (%s, %s, %s, %s)
+                ON CONFLICT(email) DO UPDATE SET is_active = EXCLUDED.is_active;
+            ''', (val, role, is_active, created_at))
+        else:
+            cursor.execute('''
+                INSERT INTO users (email, role, is_active, created_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET is_active = excluded.is_active;
+            ''', (val, role, is_active, created_at))
 
     elif id_type == "phone":
-        cursor.execute('''
-            INSERT INTO users (phone, role, is_active, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(phone) DO UPDATE SET is_active = excluded.is_active
-        ''', (val, role, is_active, created_at))
+        if db_type == "postgres":
+            cursor.execute('''
+                INSERT INTO users (phone, role, is_active, created_at) VALUES (%s, %s, %s, %s)
+                ON CONFLICT(phone) DO UPDATE SET is_active = EXCLUDED.is_active;
+            ''', (val, role, is_active, created_at))
+        else:
+            cursor.execute('''
+                INSERT INTO users (phone, role, is_active, created_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(phone) DO UPDATE SET is_active = excluded.is_active;
+            ''', (val, role, is_active, created_at))
 
     elif id_type == "telegram_id":
-        cursor.execute('''
-            INSERT INTO users (telegram_id, role, is_active, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(telegram_id) DO UPDATE SET is_active = excluded.is_active
-        ''', (val, role, is_active, created_at))
+        if db_type == "postgres":
+            cursor.execute('''
+                INSERT INTO users (telegram_id, role, is_active, created_at) VALUES (%s, %s, %s, %s)
+                ON CONFLICT(telegram_id) DO UPDATE SET is_active = EXCLUDED.is_active;
+            ''', (val, role, is_active, created_at))
+        else:
+            cursor.execute('''
+                INSERT INTO users (telegram_id, role, is_active, created_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET is_active = excluded.is_active;
+            ''', (val, role, is_active, created_at))
 
     conn.commit()
     conn.close()
 
 def link_telegram_id_to_user(user_db_id: int, telegram_id: int, username: str, first_name: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
+    ph = "%s" if db_type == "postgres" else "?"
+    cursor.execute(f'''
         UPDATE users 
-        SET telegram_id = ?, username = ?, first_name = ?, is_active = 1
-        WHERE id = ?
+        SET telegram_id = {ph}, username = {ph}, first_name = {ph}, is_active = 1
+        WHERE id = {ph}
     ''', (telegram_id, username or "", first_name or "", user_db_id))
     conn.commit()
     conn.close()
 
 def modify_user_status_by_identifier(identifier: str, is_active: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
     id_type, val = parse_identifier_type(identifier)
+    ph = "%s" if db_type == "postgres" else "?"
     rows = 0
 
     if id_type == "email":
-        cursor.execute("UPDATE users SET is_active = ? WHERE LOWER(email) = ?", (is_active, val))
+        cursor.execute(f"UPDATE users SET is_active = {ph} WHERE LOWER(email) = {ph}", (is_active, val))
         rows = cursor.rowcount
     elif id_type == "phone":
-        cursor.execute("UPDATE users SET is_active = ? WHERE phone LIKE ?", (is_active, f"%{val}%"))
+        cursor.execute(f"UPDATE users SET is_active = {ph} WHERE phone LIKE {ph}", (is_active, f"%{val}%"))
         rows = cursor.rowcount
     elif id_type == "telegram_id":
-        cursor.execute("UPDATE users SET is_active = ? WHERE telegram_id = ?", (is_active, val))
+        cursor.execute(f"UPDATE users SET is_active = {ph} WHERE telegram_id = {ph}", (is_active, val))
         rows = cursor.rowcount
 
     conn.commit()
@@ -204,19 +290,20 @@ def modify_user_status_by_identifier(identifier: str, is_active: int):
     return rows > 0
 
 def delete_user_by_identifier(identifier: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
     id_type, val = parse_identifier_type(identifier)
+    ph = "%s" if db_type == "postgres" else "?"
     rows = 0
 
     if id_type == "email":
-        cursor.execute("DELETE FROM users WHERE LOWER(email) = ?", (val,))
+        cursor.execute(f"DELETE FROM users WHERE LOWER(email) = {ph}", (val,))
         rows = cursor.rowcount
     elif id_type == "phone":
-        cursor.execute("DELETE FROM users WHERE phone LIKE ?", (f"%{val}%",))
+        cursor.execute(f"DELETE FROM users WHERE phone LIKE {ph}", (f"%{val}%",))
         rows = cursor.rowcount
     elif id_type == "telegram_id":
-        cursor.execute("DELETE FROM users WHERE telegram_id = ?", (val,))
+        cursor.execute(f"DELETE FROM users WHERE telegram_id = {ph}", (val,))
         rows = cursor.rowcount
 
     conn.commit()
@@ -224,39 +311,97 @@ def delete_user_by_identifier(identifier: str):
     return rows > 0
 
 def get_all_users():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users ORDER BY created_at DESC")
     rows = cursor.fetchall()
     conn.close()
+
+    if db_type == "postgres":
+        cols = [desc[0] for desc in cursor.description]
+        return [dict(zip(cols, r)) for r in rows]
     return [dict(r) for r in rows]
 
-def update_user_stats(telegram_id: int, is_win: bool, units: float = 1.0):
-    conn = sqlite3.connect(DB_FILE)
+def save_user_pick(telegram_id: int, fixture_id: int, fixture_name: str, market_type: str, selection: str, odds: float, stake: float):
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ph = "%s" if db_type == "postgres" else "?"
+
+    cursor.execute(f'''
+        INSERT INTO user_picks (telegram_id, fixture_id, fixture_name, market_type, selection, odds, stake, status, created_at)
+        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, 'PENDING', {ph})
+    ''', (telegram_id, fixture_id, fixture_name, market_type, selection, odds, stake, created_at))
+
+    conn.commit()
+    conn.close()
+
+def get_pending_picks():
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM user_picks WHERE status = 'PENDING'")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if db_type == "postgres":
+        cols = [desc[0] for desc in cursor.description]
+        return [dict(zip(cols, r)) for r in rows]
+    return [dict(r) for r in rows]
+
+def update_pick_and_user_stats(pick_id: int, telegram_id: int, is_win: bool, odds: float, stake: float):
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    settled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ph = "%s" if db_type == "postgres" else "?"
+    
+    new_status = 'WIN' if is_win else 'LOSS'
+    cursor.execute(f"UPDATE user_picks SET status = {ph}, settled_at = {ph} WHERE id = {ph}", (new_status, settled_at, pick_id))
+
     if is_win:
-        cursor.execute('''
+        profit = (odds - 1.0) * stake
+        cursor.execute(f'''
             UPDATE users 
-            SET bets_count = bets_count + 1, wins = wins + 1, profit_units = profit_units + ?
-            WHERE telegram_id = ?
+            SET bets_count = bets_count + 1, wins = wins + 1, profit_units = profit_units + {ph}
+            WHERE telegram_id = {ph}
+        ''', (profit, telegram_id))
+    else:
+        cursor.execute(f'''
+            UPDATE users 
+            SET bets_count = bets_count + 1, losses = losses + 1, profit_units = profit_units - {ph}
+            WHERE telegram_id = {ph}
+        ''', (stake, telegram_id))
+
+    conn.commit()
+    conn.close()
+
+def update_user_stats(telegram_id: int, is_win: bool, units: float = 1.0):
+    conn, db_type = get_db_connection()
+    cursor = conn.cursor()
+    ph = "%s" if db_type == "postgres" else "?"
+
+    if is_win:
+        cursor.execute(f'''
+            UPDATE users 
+            SET bets_count = bets_count + 1, wins = wins + 1, profit_units = profit_units + {ph}
+            WHERE telegram_id = {ph}
         ''', (units, telegram_id))
     else:
-        cursor.execute('''
+        cursor.execute(f'''
             UPDATE users 
-            SET bets_count = bets_count + 1, losses = losses + 1, profit_units = profit_units - ?
-            WHERE telegram_id = ?
+            SET bets_count = bets_count + 1, losses = losses + 1, profit_units = profit_units - {ph}
+            WHERE telegram_id = {ph}
         ''', (units, telegram_id))
     conn.commit()
     conn.close()
 
 def reset_user_stats(telegram_id: int):
-    conn = sqlite3.connect(DB_FILE)
+    conn, db_type = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
+    ph = "%s" if db_type == "postgres" else "?"
+    cursor.execute(f'''
         UPDATE users 
         SET bets_count = 0, wins = 0, losses = 0, profit_units = 0.0
-        WHERE telegram_id = ?
+        WHERE telegram_id = {ph}
     ''', (telegram_id,))
     conn.commit()
     conn.close()
@@ -277,7 +422,7 @@ def is_admin(user_id: int) -> bool:
     return False
 
 # ---------------------------------------------------------
-# 4. Servidor HTTP de Salud (Render Port Binding)
+# 3. Servidor HTTP de Salud (Render Port Binding)
 # ---------------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -300,7 +445,7 @@ def start_health_server():
     server.serve_forever()
 
 # ---------------------------------------------------------
-# 5. Control de Acceso e Inserción Directa
+# 4. Control de Acceso (Middleware)
 # ---------------------------------------------------------
 def get_verification_reply_keyboard():
     keyboard = [
@@ -317,21 +462,28 @@ async def check_access(update: Update) -> bool:
     username = user.username or ""
     first_name = user.first_name or ""
 
-    # Administrador: se asegura de que exista en la BD con rol 'admin'
     if is_admin(user_id):
-        conn = sqlite3.connect(DB_FILE)
+        conn, db_type = get_db_connection()
         cursor = conn.cursor()
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute('''
-            INSERT INTO users (telegram_id, username, first_name, role, is_active, created_at)
-            VALUES (?, ?, ?, 'admin', 1, ?)
-            ON CONFLICT(telegram_id) DO UPDATE SET role='admin', is_active=1, username=excluded.username, first_name=excluded.first_name
-        ''', (user_id, username, first_name, created_at))
+
+        if db_type == "postgres":
+            cursor.execute('''
+                INSERT INTO users (telegram_id, username, first_name, role, is_active, created_at)
+                VALUES (%s, %s, %s, 'admin', 1, %s)
+                ON CONFLICT(telegram_id) DO UPDATE SET role='admin', is_active=1, username=EXCLUDED.username, first_name=EXCLUDED.first_name;
+            ''', (user_id, username, first_name, created_at))
+        else:
+            cursor.execute('''
+                INSERT INTO users (telegram_id, username, first_name, role, is_active, created_at)
+                VALUES (?, ?, ?, 'admin', 1, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET role='admin', is_active=1, username=excluded.username, first_name=excluded.first_name;
+            ''', (user_id, username, first_name, created_at))
+
         conn.commit()
         conn.close()
         return True
 
-    # Usuario Estándar: verificar por Telegram ID
     db_user = get_user_by_telegram_id(user_id)
     if db_user and db_user.get("is_active") == 1:
         return True
@@ -348,7 +500,6 @@ async def check_access(update: Update) -> bool:
             await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
         return False
 
-    # Solicitud de Verificación para no registrados
     verify_msg = (
         "⛔ *ACCESO RESTRINGIDO / VERIFICACIÓN DE CUENTA*\n\n"
         "Para ingresar a **NosticProno**, tu cuenta debe estar pre-aprobada por el administrador.\n\n"
@@ -364,7 +515,7 @@ async def check_access(update: Update) -> bool:
     return False
 
 # ---------------------------------------------------------
-# 6. Conversor de Horario a Zona Local (Uruguay)
+# 5. Conversor de Horario a Zona Local (Uruguay)
 # ---------------------------------------------------------
 def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> str:
     fixture_data = fix.get("fixture", {})
@@ -387,26 +538,35 @@ def format_match_time(fix: dict, utc_offset_hours: int = UTC_OFFSET_HOURS) -> st
     return "--:--"
 
 # ---------------------------------------------------------
-# 7. Modelos Matemáticos (Poisson & Kelly)
+# 6. Motor Matemático: Ajuste Dixon & Coles
 # ---------------------------------------------------------
 def poisson_pmf(lmbda: float, k: int) -> float:
     if lmbda <= 0:
         return 0.0
     return (lmbda ** k) * math.exp(-lmbda) / math.factorial(k)
 
-def calculate_match_metrics(home_exp: float, away_exp: float, max_goals: int = 7):
+def dixon_coles_tau(h: int, a: int, lmbda: float, mu: float, rho: float = -0.10) -> float:
+    if h == 0 and a == 0:
+        return 1.0 - (lmbda * mu * rho)
+    elif h == 1 and a == 0:
+        return 1.0 + (mu * rho)
+    elif h == 0 and a == 1:
+        return 1.0 + (lmbda * rho)
+    elif h == 1 and a == 1:
+        return 1.0 - rho
+    return 1.0
+
+def calculate_match_metrics(home_exp: float, away_exp: float, max_goals: int = 7, rho: float = -0.10):
     p_home, p_draw, p_away = 0.0, 0.0, 0.0
     p_over_25 = 0.0
-
-    prob_home_zero = poisson_pmf(home_exp, 0)
-    prob_away_zero = poisson_pmf(away_exp, 0)
-    p_btts = (1.0 - prob_home_zero) * (1.0 - prob_away_zero)
+    p_btts = 0.0
 
     for h in range(max_goals):
         prob_h = poisson_pmf(home_exp, h)
         for a in range(max_goals):
             prob_a = poisson_pmf(away_exp, a)
-            p_matrix = prob_h * prob_a
+            tau = dixon_coles_tau(h, a, home_exp, away_exp, rho)
+            p_matrix = prob_h * prob_a * tau
 
             if h > a:
                 p_home += p_matrix
@@ -418,6 +578,9 @@ def calculate_match_metrics(home_exp: float, away_exp: float, max_goals: int = 7
             if (h + a) > 2.5:
                 p_over_25 += p_matrix
 
+            if h > 0 and a > 0:
+                p_btts += p_matrix
+
     return {
         "p_home": p_home,
         "p_draw": p_draw,
@@ -428,7 +591,7 @@ def calculate_match_metrics(home_exp: float, away_exp: float, max_goals: int = 7
         "p_btts_no": 1.0 - p_btts
     }
 
-def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_fraction: float = 0.20) -> float:
+def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_fraction: float = 0.15) -> float:
     if decimal_odds <= 1.0 or probability <= 0.0:
         return 0.0
 
@@ -442,6 +605,9 @@ def calculate_kelly_stake(probability: float, decimal_odds: float, bankroll_frac
 
     return round(f_star * bankroll_fraction * 100, 2)
 
+# ---------------------------------------------------------
+# 7. Motor de Cuotas e Integración de Mercados
+# ---------------------------------------------------------
 def generate_fixture_analytics(fix: dict):
     fix_id = fix.get("fixture", {}).get("id", 0)
     seed = int(hashlib.md5(str(fix_id).encode()).hexdigest(), 16)
@@ -449,16 +615,39 @@ def generate_fixture_analytics(fix: dict):
     home_exp = round(1.10 + ((seed % 100) / 70.0), 2)
     away_exp = round(0.75 + (((seed // 100) % 100) / 80.0), 2)
 
-    metrics = calculate_match_metrics(home_exp, away_exp)
+    metrics = calculate_match_metrics(home_exp, away_exp, rho=-0.10)
 
-    p_home = max(metrics["p_home"], 0.15)
-    base_odds = 1.0 / p_home
-    odds_home = round(base_odds * (0.92 + ((seed % 35) / 100.0)), 2)
-    odds_home = max(odds_home, 1.25)
+    is_real_odds = False
+    odds_source = "Modelo Est."
 
-    p_over = max(metrics["p_over_25"], 0.15)
-    odds_over = round((1.0 / p_over) * (0.90 + (((seed // 10) % 30) / 100.0)), 2)
-    odds_over = max(odds_over, 1.30)
+    real_bookmakers = fix.get("bookmakers", [])
+    odds_home = None
+    odds_over = None
+
+    if real_bookmakers:
+        for bookie in real_bookmakers:
+            for mkt in bookie.get("bets", []):
+                if mkt.get("name") in ["Match Winner", "1X2"]:
+                    for val in mkt.get("values", []):
+                        if val.get("value") == "Home":
+                            odds_home = float(val.get("odd"))
+                            is_real_odds = True
+                            odds_source = bookie.get("name", "Real")
+                elif mkt.get("name") in ["Goals Over/Under", "Total Goals"]:
+                    for val in mkt.get("values", []):
+                        if val.get("value") == "Over 2.5":
+                            odds_over = float(val.get("odd"))
+
+    if not odds_home:
+        p_home = max(metrics["p_home"], 0.15)
+        base_odds = 1.0 / p_home
+        odds_home = round(base_odds * (0.92 + ((seed % 35) / 100.0)), 2)
+        odds_home = max(odds_home, 1.25)
+
+    if not odds_over:
+        p_over = max(metrics["p_over_25"], 0.15)
+        odds_over = round((1.0 / p_over) * (0.90 + (((seed // 10) % 30) / 100.0)), 2)
+        odds_over = max(odds_over, 1.30)
 
     exp_corners = round(8.2 + (((seed // 1000) % 60) / 10.0), 1)
     exp_cards = round(3.2 + (((seed // 10000) % 40) / 10.0), 1)
@@ -470,6 +659,8 @@ def generate_fixture_analytics(fix: dict):
         "away_exp": away_exp,
         "odds_home": odds_home,
         "odds_over": odds_over,
+        "is_real_odds": is_real_odds,
+        "odds_source": odds_source,
         "exp_corners": exp_corners,
         "exp_cards": exp_cards,
         "confidence": confidence
@@ -540,8 +731,109 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
 
     return None, "ERROR"
 
+async def fetch_fixture_by_id(fixture_id: int):
+    api_key = os.getenv("API_FOOTBALL_KEY") or os.getenv("APISPORTS_KEY")
+    if not api_key:
+        return None
+
+    url = f"https://v3.football.api-sports.io/fixtures?id={fixture_id}"
+    headers = {"x-apisports-key": api_key}
+
+    rapid_key = os.getenv("RAPIDAPI_KEY")
+    if rapid_key:
+        url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?id={fixture_id}"
+        headers = {
+            "x-rapidapi-key": rapid_key,
+            "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
+        }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, timeout=8.0)
+            if response.status_code == 200:
+                data = response.json()
+                res = data.get("response", [])
+                return res[0] if res else None
+    except Exception as e:
+        logger.error(f"Error consultando fixture {fixture_id}: {e}")
+    return None
+
 # ---------------------------------------------------------
-# 9. Teclados de la Interfaz (UI)
+# 9. Tarea en Segundo Plano: Auto-Settlement de Apuestas
+# ---------------------------------------------------------
+async def auto_settlement_worker(app):
+    """Revisa periódicamente los picks pendientes y los liquida automáticamente."""
+    while True:
+        try:
+            logger.info("Ejecutando worker de Auto-Settlement...")
+            pending_picks = get_pending_picks()
+
+            if pending_picks:
+                # Agrupar picks por fixture_id para minimizar llamadas a la API
+                grouped_picks = {}
+                for p in pending_picks:
+                    fid = p['fixture_id']
+                    if fid not in grouped_picks:
+                        grouped_picks[fid] = []
+                    grouped_picks[fid].append(p)
+
+                for fid, picks in grouped_picks.items():
+                    fix_data = await fetch_fixture_by_id(fid)
+                    if not fix_data:
+                        continue
+
+                    status_short = fix_data.get("fixture", {}).get("status", {}).get("short")
+                    
+                    # Evaluar únicamente si el partido ya finalizó
+                    if status_short in ["FT", "AET", "PEN"]:
+                        goals_home = fix_data.get("goals", {}).get("home", 0) or 0
+                        goals_away = fix_data.get("goals", {}).get("away", 0) or 0
+                        total_goals = goals_home + goals_away
+
+                        for pick in picks:
+                            is_win = False
+                            sel = pick['selection']
+                            mkt = pick['market_type']
+
+                            if mkt == "1X2" and sel == "HOME" and goals_home > goals_away:
+                                is_win = True
+                            elif mkt == "GOALS" and sel == "OVER_25" and total_goals > 2.5:
+                                is_win = True
+                            elif mkt == "GOALS" and sel == "BTTS_YES" and goals_home > 0 and goals_away > 0:
+                                is_win = True
+
+                            update_pick_and_user_stats(
+                                pick['id'],
+                                pick['telegram_id'],
+                                is_win,
+                                pick['odds'],
+                                pick['stake']
+                            )
+
+                            # Enviar notificación en Telegram al usuario
+                            try:
+                                result_icon = "🟢 ¡GANADA!" if is_win else "🔴 PERDIDA"
+                                profit_units = (pick['odds'] - 1.0) * pick['stake'] if is_win else -pick['stake']
+                                msg = (
+                                    f"🏆 *AUTO-SETTLEMENT DE APUESTA*\n\n"
+                                    f"⚽ *Partido:* {pick['fixture_name']}\n"
+                                    f"📊 *Resultado Final:* `{goals_home} - {goals_away}`\n"
+                                    f"📌 *Tu Selección:* `{sel}` | Cuota: `{pick['odds']:.2f}`\n\n"
+                                    f"🎯 *Estado:* {result_icon} (`{profit_units:+.2f}u`)\n"
+                                    f"Tus estadísticas han sido actualizadas automáticamente."
+                                )
+                                await app.bot.send_message(chat_id=pick['telegram_id'], text=msg, parse_mode="Markdown")
+                            except Exception as err:
+                                logger.error(f"No se pudo notificar al usuario {pick['telegram_id']}: {err}")
+
+        except Exception as e:
+            logger.error(f"Error en auto_settlement_worker: {e}")
+
+        # Ejecutar verificación cada 30 minutos (1800 segundos)
+        await asyncio.sleep(1800)
+
+# ---------------------------------------------------------
+# 10. Teclados de la Interfaz (UI)
 # ---------------------------------------------------------
 def get_main_reply_keyboard(user_id: int = None):
     keyboard = [
@@ -568,7 +860,7 @@ def get_date_inline_keyboard(category_code: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ---------------------------------------------------------
-# 10. Comandos de Administración
+# 11. Comandos de Administración
 # ---------------------------------------------------------
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
@@ -678,7 +970,7 @@ async def eliminar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠ No se encontró ningún registro para `{identifier}`.", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 11. Verificación por Teléfono y Correo
+# 12. Verificación por Teléfono y Correo
 # ---------------------------------------------------------
 async def contact_verification_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.effective_message.contact
@@ -712,7 +1004,7 @@ async def contact_verification_handler(update: Update, context: ContextTypes.DEF
         )
 
 # ---------------------------------------------------------
-# 12. Callback Query Handler
+# 13. Callback Query Handler
 # ---------------------------------------------------------
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -744,6 +1036,22 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         await query.message.reply_text(stats_msg, parse_mode="Markdown")
 
+    elif data.startswith("savepick_"):
+        # Guardar pick seleccionado por el usuario para Auto-Settlement
+        _, fid, mkt, sel, odds, stake = data.split("_", 5)
+        user_id = query.from_user.id
+        
+        save_user_pick(
+            telegram_id=user_id,
+            fixture_id=int(fid),
+            fixture_name="Partido Registrado",
+            market_type=mkt,
+            selection=sel,
+            odds=float(odds),
+            stake=float(stake)
+        )
+        await query.answer("✅ Pick guardado. Se liquidará automáticamente al finalizar el partido.", show_alert=True)
+
     elif data == "stat_win":
         update_user_stats(query.from_user.id, is_win=True, units=1.0)
         await query.edit_message_text("✅ *Acierto registrado (+1.0u).* Usa '📊 Mis Estadísticas' para ver tu balance.", parse_mode="Markdown")
@@ -757,7 +1065,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("🔄 *Tus estadísticas han sido reiniciadas a 0.*", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 13. Procesador de Fechas / Partidos
+# 14. Procesador de Fechas / Partidos
 # ---------------------------------------------------------
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -805,8 +1113,8 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     target_fixtures = fixtures[:5]
 
     if category_code == "cat1x2":
-        picks = []
         for fix in target_fixtures:
+            fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
@@ -815,21 +1123,27 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             analytics = generate_fixture_analytics(fix)
             p_home = analytics["metrics"]["p_home"]
             odds_home = analytics["odds_home"]
+            odds_tag = f"Real ({analytics['odds_source']})" if analytics["is_real_odds"] else "Estimada"
+
             ev = (p_home * odds_home) - 1.0
             stake = calculate_kelly_stake(p_home, odds_home)
             ev_display = f"+{ev*100:.1f}%" if ev > 0 else f"{ev*100:.1f}%"
 
-            picks.append(
+            card_text = (
                 f"🏆 *{home} vs {away}* (`{match_time} HS`)\n"
                 f"📌 Selección: *Victoria Local ({home})*\n"
-                f"📊 Cuota: `{odds_home:.2f}` | Prob. Real: `{p_home*100:.1f}%`\n"
+                f"📊 Cuota [{odds_tag}]: `{odds_home:.2f}` | Prob. Real (Dixon-Coles): `{p_home*100:.1f}%`\n"
                 f"📈 EV: `{ev_display}` | Stake Kelly: `{stake}%`"
             )
-        response = f"⚽ *PRONÓSTICOS 1X2 - {label.upper()}*\n\n" + "\n\n---\n\n".join(picks)
+
+            btn = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📌 Guardar este Pick para Auto-Settlement", callback_data=f"savepick_{fid}_1X2_HOME_{odds_home}_{stake}")
+            ]])
+            await query.message.reply_text(card_text, parse_mode="Markdown", reply_markup=btn)
 
     elif category_code == "catgoals":
-        picks = []
         for fix in target_fixtures:
+            fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
@@ -839,16 +1153,21 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             p_over = analytics["metrics"]["p_over_25"]
             p_btts = analytics["metrics"]["p_btts_yes"]
             odds_over = analytics["odds_over"]
+            odds_tag = f"Real ({analytics['odds_source']})" if analytics["is_real_odds"] else "Estimada"
             stake = calculate_kelly_stake(p_over, odds_over)
 
-            picks.append(
+            card_text = (
                 f"⚽ *{home} vs {away}* (`{match_time} HS`)\n"
                 f"   • *Línea:* Más de 2.5 Goles\n"
-                f"   • *Cuota:* `{odds_over:.2f}` | Prob Over 2.5: `{p_over*100:.1f}%`\n"
+                f"   • *Cuota [{odds_tag}]:* `{odds_over:.2f}` | Prob Over 2.5: `{p_over*100:.1f}%`\n"
                 f"   • *Prob. BTTS (Ambos Anotan):* `{p_btts*100:.1f}%`\n"
                 f"   🎯 *Stake Kelly:* `{stake}%`"
             )
-        response = f"⚽ *PRONÓSTICOS GOLES & BTTS - {label.upper()}*\n\n" + "\n\n---\n\n".join(picks)
+
+            btn = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📌 Guardar Over 2.5 Goles", callback_data=f"savepick_{fid}_GOALS_OVER_25_{odds_over}_{stake}")
+            ]])
+            await query.message.reply_text(card_text, parse_mode="Markdown", reply_markup=btn)
 
     elif category_code == "catcorners":
         projections = []
@@ -867,10 +1186,12 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 f"   • *Confianza Modelo:* `{analytics['confidence']}%`"
             )
         response = f"🚩 *CÓRNERS Y TARJETAS - {label.upper()}*\n\n" + "\n\n---\n\n".join(projections)
+        await query.message.reply_text(response, parse_mode="Markdown")
 
     elif category_code == "catcombo":
         if len(target_fixtures) < 2:
             response = f"ℹ️ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
+            await query.message.reply_text(response, parse_mode="Markdown")
         else:
             f1, f2 = target_fixtures[0], target_fixtures[1]
             t1_h = f1.get("teams", {}).get("home", {}).get("name")
@@ -889,22 +1210,23 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             stake = calculate_kelly_stake(combined_prob, total_odds, bankroll_fraction=0.15)
             ev_display = f"+{ev*100:.1f}%" if ev > 0 else f"{ev*100:.1f}%"
 
+            odds_type = "Real" if (a1["is_real_odds"] and a2["is_real_odds"]) else "Estimada"
+
             response = (
                 f"🧩 *COMBINADA DE VALOR (EV+) - {label.upper()}*\n\n"
                 f"1️⃣ *{t1_h} vs {t1_a}*\n"
                 f"   📌 Selección: Victoria Local ({t1_h}) | Cuota: `{odds1:.2f}`\n\n"
                 f"2️⃣ *{t2_h} vs {t2_a}*\n"
                 f"   📌 Selección: Victoria Local ({t2_h}) | Cuota: `{odds2:.2f}`\n\n"
-                f"📊 *Resumen:*\n"
+                f"📊 *Resumen ({odds_type}):*\n"
                 f"• *Cuota Total:* `{total_odds:.2f}`\n"
-                f"• *Probabilidad Estimada:* `{combined_prob*100:.1f}%`\n"
+                f"• *Probabilidad Estimada (Dixon-Coles):* `{combined_prob*100:.1f}%`\n"
                 f"• *EV:* `{ev_display}` | Stake Sugerido: `{stake}%`"
             )
-
-    await query.edit_message_text(response, parse_mode="Markdown")
+            await query.message.reply_text(response, parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 14. Sección "Mis Estadísticas" de Usuario
+# 15. Sección "Mis Estadísticas" de Usuario
 # ---------------------------------------------------------
 async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
@@ -931,13 +1253,13 @@ async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"• *Fallos (Perdidas):* `{losses}`\n"
         f"• *Win Rate:* `{win_rate:.1f}%`\n"
         f"• *Beneficio Total:* `{profit:+.2f}u`\n\n"
-        "👇 *Registra tus resultados para mantener tu historial:* "
+        "🤖 *El sistema liquida automáticamente tus picks guardados al finalizar cada partido.*"
     )
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Registrar Ganada (+1u)", callback_data="stat_win"),
-            InlineKeyboardButton("❌ Registrar Perdida (-1u)", callback_data="stat_loss")
+            InlineKeyboardButton("✅ Manual: Ganada (+1u)", callback_data="stat_win"),
+            InlineKeyboardButton("❌ Manual: Perdida (-1u)", callback_data="stat_loss")
         ],
         [InlineKeyboardButton("🔄 Reiniciar Mis Estadísticas", callback_data="stat_reset")]
     ])
@@ -945,7 +1267,7 @@ async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(stats_msg, parse_mode="Markdown", reply_markup=keyboard)
 
 # ---------------------------------------------------------
-# 15. Router de Menú Principal y Texto
+# 16. Router de Menú Principal y Texto
 # ---------------------------------------------------------
 async def prompt_date_selection(update: Update, category_code: str, title: str):
     text = f"🗓️ *Selecciona la jornada para {title}:*"
@@ -959,7 +1281,6 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     user = update.effective_user
 
-    # Verificación si el usuario ingresa su correo electrónico
     if "@" in text and "." in text and not get_user_by_telegram_id(user.id):
         matched_user = get_user_by_email(text)
         if matched_user and matched_user.get("is_active") == 1:
@@ -1026,8 +1347,8 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ *No quedan partidos pendientes por disputarse hoy.*", parse_mode="Markdown")
         return
 
-    top_picks = []
     for fix in valid_fixtures[:3]:
+        fid = fix.get("fixture", {}).get("id", 0)
         teams = fix.get("teams", {})
         home = teams.get("home", {}).get("name")
         away = teams.get("away", {}).get("name")
@@ -1036,19 +1357,22 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         analytics = generate_fixture_analytics(fix)
         p_home = analytics["metrics"]["p_home"]
         odds_home = analytics["odds_home"]
+        odds_tag = f"Real ({analytics['odds_source']})" if analytics["is_real_odds"] else "Estimada"
+
         ev = (p_home * odds_home) - 1.0
         stake = calculate_kelly_stake(p_home, odds_home)
 
-        top_picks.append(
+        pick_text = (
             f"🔥 *{home} vs {away}* (`{match_time} HS`)\n"
             f"   • *Pick:* Victoria {home}\n"
-            f"   • *Cuota:* `{odds_home:.2f}` | *Prob. Modelo:* `{p_home*100:.1f}%`\n"
+            f"   • *Cuota [{odds_tag}]:* `{odds_home:.2f}` | *Prob. Dixon-Coles:* `{p_home*100:.1f}%`\n"
             f"   • *Ventaja Matemática (EV):* `+{max(ev, 0.03)*100:.1f}%` 💎\n"
             f"   • *Apuesta Sugerida:* `{stake}%` de tu banca"
         )
-
-    response = "🎯 *TOP SELECCIONES CON MAYOR VALOR (+EV) HOY*\n\n" + "\n\n---\n\n".join(top_picks)
-    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_main_reply_keyboard(update.effective_user.id))
+        btn = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📌 Guardar Top Pick", callback_data=f"savepick_{fid}_1X2_HOME_{odds_home}_{stake}")
+        ]])
+        await update.message.reply_text(pick_text, parse_mode="Markdown", reply_markup=btn)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
@@ -1057,11 +1381,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 *GUÍA DE LECTURA DE PRONÓSTICOS*\n\n"
         "Aprende a interpretar los datos de **NosticProno**:\n\n"
-        "📊 *1. Cuota (Odds):* Multiplicador oficial.\n"
-        "📈 *2. Probabilidad del Modelo (%):* Probabilidad real estimada mediante Distribución de Poisson.\n"
-        "💡 *3. Valor Esperado (EV+):* Ventaja matemática sobre la casa.\n"
+        "📊 *1. Cuota (Odds):* Multiplicador oficial o estimado.\n"
+        "📈 *2. Probabilidad del Modelo (%):* Estimación real ajustada mediante modelo Dixon & Coles.\n"
+        "💡 *3. Valor Esperado (EV+):* Ventaja matemática sobre el mercado.\n"
         "🎯 *4. Stake Kelly (%):* Porcentaje sugerido de tu banca para apostar.\n"
-        "🚩 *5. Córners / Tarjetas:* Proyección numérica esperada."
+        "📌 *5. Auto-Settlement:* Al presionar 'Guardar Pick', el bot evalúa automáticamente el resultado final en la API."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_main_reply_keyboard(update.effective_user.id))
 
@@ -1083,7 +1407,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Error no capturado:", exc_info=context.error)
 
 # ---------------------------------------------------------
-# 16. Punto de Entrada Principal (Main)
+# 17. Punto de Entrada Principal (Main)
 # ---------------------------------------------------------
 def main():
     token_raw = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
@@ -1094,7 +1418,7 @@ def main():
     init_db()
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    logger.info("Inicializando NosticProno Bot...")
+    logger.info("Inicializando NosticProno Bot (con Auto-Settlement)...")
     application = ApplicationBuilder().token(token_raw.strip()).build()
 
     application.add_handler(MessageHandler(filters.CONTACT, contact_verification_handler))
@@ -1111,11 +1435,15 @@ def main():
     application.add_handler(CommandHandler("activar", activar_command))
     application.add_handler(CommandHandler("eliminar", eliminar_command))
 
-    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(adm_|stat_)"))
+    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(adm_|stat_|savepick_)"))
     application.add_handler(CallbackQueryHandler(date_callback_handler, pattern="^cat"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
     application.add_error_handler(error_handler)
+
+    # Iniciar worker de Auto-Settlement en segundo plano
+    loop = asyncio.get_event_loop()
+    loop.create_task(auto_settlement_worker(application))
 
     logger.info("Bot activo en Telegram.")
     application.run_polling(drop_pending_updates=True)
