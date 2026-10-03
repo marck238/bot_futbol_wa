@@ -43,6 +43,18 @@ LOCAL_TIMEZONE_NAME = "America/Montevideo"
 UTC_OFFSET_HOURS = -3
 DB_FILE = "users.db"
 
+# Diccionario de Ligas Populares (ID API-Football -> Nombre)
+TOP_LEAGUES = {
+    "ALL": "🌍 Todas las Ligas",
+    "39": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
+    "140": "🇪🇸 La Liga",
+    "135": "🇮🇹 Serie A",
+    "78": "🇩🇪 Bundesliga",
+    "61": "🇫🇷 Ligue 1",
+    "2": "🏆 UEFA Champions League",
+    "268": "🇺🇾 Primera División (Uruguay)"
+}
+
 # ---------------------------------------------------------
 # 1. Logging
 # ---------------------------------------------------------
@@ -382,7 +394,6 @@ def update_pick_and_user_stats(pick_id: int, telegram_id: int, is_win: bool, odd
     conn.close()
 
 def update_pick_void(pick_id: int):
-    """Marca un pick como VOID (anulado/reembolsado) sin alterar ganancias ni pérdidas."""
     conn, db_type = get_db_connection()
     cursor = conn.cursor()
     settled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -705,7 +716,6 @@ def get_target_date_str(offset_days: int) -> tuple[str, str]:
     return date_str, label
 
 async def safe_http_get(url: str, headers: dict, retries: int = 3, backoff: float = 1.0):
-    """Cliente HTTP con reintentos automáticos y Backoff Exponencial."""
     async with httpx.AsyncClient() as client:
         for attempt in range(retries):
             try:
@@ -720,7 +730,7 @@ async def safe_http_get(url: str, headers: dict, retries: int = 3, backoff: floa
                     await asyncio.sleep(backoff * (2 ** attempt))
     return None, "ERROR"
 
-async def fetch_api_football_fixtures_by_date(date_str: str):
+async def fetch_api_football_fixtures_by_date(date_str: str, league_id: str = "ALL"):
     global _cached_fixtures
 
     api_key = os.getenv("API_FOOTBALL_KEY") or os.getenv("APISPORTS_KEY")
@@ -728,18 +738,24 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
         return None, "NO_API_KEY"
 
     current_time = time.time()
+    cache_key = f"{date_str}_{league_id}"
 
-    if date_str in _cached_fixtures:
-        cache_entry = _cached_fixtures[date_str]
+    if cache_key in _cached_fixtures:
+        cache_entry = _cached_fixtures[cache_key]
         if current_time - cache_entry["timestamp"] < CACHE_TTL_SECONDS:
             return cache_entry["data"], "OK"
 
     url = f"https://v3.football.api-sports.io/fixtures?date={date_str}&timezone={LOCAL_TIMEZONE_NAME}"
+    if league_id != "ALL":
+        url += f"&league={league_id}"
+
     headers = {"x-apisports-key": api_key}
 
     rapid_key = os.getenv("RAPIDAPI_KEY")
     if rapid_key:
         url = f"https://api-football-v1.p.rapidapi.com/v3/fixtures?date={date_str}&timezone={LOCAL_TIMEZONE_NAME}"
+        if league_id != "ALL":
+            url += f"&league={league_id}"
         headers = {
             "x-rapidapi-key": rapid_key,
             "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
@@ -749,7 +765,7 @@ async def fetch_api_football_fixtures_by_date(date_str: str):
     if status == "OK" and data:
         fixtures = data.get("response", [])
         if fixtures:
-            _cached_fixtures[date_str] = {
+            _cached_fixtures[cache_key] = {
                 "data": fixtures,
                 "timestamp": current_time
             }
@@ -803,7 +819,6 @@ async def auto_settlement_worker(app):
 
                     status_short = fix_data.get("fixture", {}).get("status", {}).get("short")
                     
-                    # 1. Partidos Finalizados
                     if status_short in ["FT", "AET", "PEN"]:
                         goals_home = fix_data.get("goals", {}).get("home", 0) or 0
                         goals_away = fix_data.get("goals", {}).get("away", 0) or 0
@@ -844,7 +859,6 @@ async def auto_settlement_worker(app):
                             except Exception as err:
                                 logger.error(f"No se pudo notificar al usuario {pick['telegram_id']}: {err}")
 
-                    # 2. Partidos Cancelados / Pospuestos / Suspendidos (VOID)
                     elif status_short in ["PST", "CANC", "ABD", "WO"]:
                         for pick in picks:
                             update_pick_void(pick['id'])
@@ -865,7 +879,7 @@ async def auto_settlement_worker(app):
         await asyncio.sleep(1800)
 
 # ---------------------------------------------------------
-# 10. Teclados de la Interfaz (UI)
+# 10. Teclados de la Interfaz (UI con Filtros de Liga)
 # ---------------------------------------------------------
 def get_main_reply_keyboard(user_id: int = None):
     keyboard = [
@@ -877,16 +891,31 @@ def get_main_reply_keyboard(user_id: int = None):
         keyboard.append([KeyboardButton("⚙️ Panel Admin")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_date_inline_keyboard(category_code: str):
+def get_league_inline_keyboard(category_code: str):
+    keyboard = []
+    buttons_row = []
+    
+    for lid, name in TOP_LEAGUES.items():
+        buttons_row.append(InlineKeyboardButton(name, callback_data=f"lg_{category_code}_{lid}"))
+        if len(buttons_row) == 2:
+            keyboard.append(buttons_row)
+            buttons_row = []
+            
+    if buttons_row:
+        keyboard.append(buttons_row)
+        
+    return InlineKeyboardMarkup(keyboard)
+
+def get_date_inline_keyboard(category_code: str, league_id: str):
     _, label_0 = get_target_date_str(0)
     _, label_1 = get_target_date_str(1)
     _, label_2 = get_target_date_str(2)
 
     keyboard = [
         [
-            InlineKeyboardButton(f"📅 {label_0}", callback_data=f"{category_code}_0"),
-            InlineKeyboardButton(f"📅 {label_1}", callback_data=f"{category_code}_1"),
-            InlineKeyboardButton(f"📅 {label_2}", callback_data=f"{category_code}_2")
+            InlineKeyboardButton(f"📅 {label_0}", callback_data=f"dt_{category_code}_{league_id}_0"),
+            InlineKeyboardButton(f"📅 {label_1}", callback_data=f"dt_{category_code}_{league_id}_1"),
+            InlineKeyboardButton(f"📅 {label_2}", callback_data=f"dt_{category_code}_{league_id}_2")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1096,8 +1125,26 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("🔄 *Tus estadísticas han sido reiniciadas a 0.*", parse_mode="Markdown")
 
 # ---------------------------------------------------------
-# 14. Procesador de Fechas / Partidos
+# 14. Procesador de Ligas y Fechas / Partidos
 # ---------------------------------------------------------
+async def league_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not await check_access(update):
+        return
+
+    data = query.data  # Formato: lg_{category_code}_{league_id}
+    _, category_code, league_id = data.split("_", 2)
+    league_name = TOP_LEAGUES.get(league_id, "Liga Seleccionada")
+
+    text = f"🏆 *Liga:* `{league_name}`\n🗓️ *Selecciona la jornada:*"
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=get_date_inline_keyboard(category_code, league_id)
+    )
+
 async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1105,14 +1152,16 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not await check_access(update):
         return
 
-    data = query.data
-    category_code, offset_str = data.rsplit("_", 1)
+    data = query.data  # Formato: dt_{category_code}_{league_id}_{offset_str}
+    _, category_code, league_id, offset_str = data.split("_", 3)
     offset_days = int(offset_str)
 
     date_str, label = get_target_date_str(offset_days)
-    await query.edit_message_text(f"🔄 Consultando partidos para *{label}*...", parse_mode="Markdown")
+    league_name = TOP_LEAGUES.get(league_id, "Todas las Ligas")
 
-    fixtures, status = await fetch_api_football_fixtures_by_date(date_str)
+    await query.edit_message_text(f"🔄 Consultando partidos para *{league_name}* en *{label}*...", parse_mode="Markdown")
+
+    fixtures, status = await fetch_api_football_fixtures_by_date(date_str, league_id)
 
     if status == "NO_API_KEY":
         await query.edit_message_text("🔑 *Clave de API no configurada.*", parse_mode="Markdown")
@@ -1121,7 +1170,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("⚠ *Límite de la API alcanzado.*", parse_mode="Markdown")
         return
     elif not fixtures:
-        await query.edit_message_text(f"ℹ *No se encontraron partidos programados para {label}.*", parse_mode="Markdown")
+        await query.edit_message_text(f"ℹ *No se encontraron partidos programados en {league_name} para {label}.*", parse_mode="Markdown")
         return
 
     now_ts = int(time.time())
@@ -1135,7 +1184,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         if not valid_fixtures:
             await query.edit_message_text(
-                f"ℹ *No quedan partidos pendientes por disputarse en {label}.*",
+                f"ℹ *No quedan partidos pendientes por disputarse en {league_name} para {label}.*",
                 parse_mode="Markdown"
             )
             return
@@ -1147,6 +1196,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         for fix in target_fixtures:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
+            league_info = fix.get("league", {}).get("name", "Fútbol")
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
             
@@ -1161,7 +1211,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             ev_display = f"+{ev*100:.1f}%" if ev > 0 else f"{ev*100:.1f}%"
 
             card_text = (
-                f"🏆 *{home} vs {away}* (`{match_time} HS`)\n"
+                f"🏆 *[{league_info}] {home} vs {away}* (`{match_time} HS`)\n"
                 f"📌 Selección: *Victoria Local ({home})*\n"
                 f"📊 Cuota [{odds_tag}]: `{odds_home:.2f}` | Prob. Real (Dixon-Coles): `{p_home*100:.1f}%`\n"
                 f"📈 EV: `{ev_display}` | Stake Kelly: `{stake}%`"
@@ -1176,6 +1226,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         for fix in target_fixtures:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
+            league_info = fix.get("league", {}).get("name", "Fútbol")
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
             
@@ -1188,7 +1239,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             stake = calculate_kelly_stake(p_over, odds_over)
 
             card_text = (
-                f"⚽ *{home} vs {away}* (`{match_time} HS`)\n"
+                f"⚽ *[{league_info}] {home} vs {away}* (`{match_time} HS`)\n"
                 f"   • *Línea:* Más de 2.5 Goles\n"
                 f"   • *Cuota [{odds_tag}]:* `{odds_over:.2f}` | Prob Over 2.5: `{p_over*100:.1f}%`\n"
                 f"   • *Prob. BTTS (Ambos Anotan):* `{p_btts*100:.1f}%`\n"
@@ -1204,6 +1255,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         projections = []
         for fix in target_fixtures:
             teams = fix.get("teams", {})
+            league_info = fix.get("league", {}).get("name", "Fútbol")
             home = teams.get("home", {}).get("name")
             away = teams.get("away", {}).get("name")
             
@@ -1211,17 +1263,17 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             analytics = generate_fixture_analytics(fix)
 
             projections.append(
-                f"🚩 *{home} vs {away}* (`{match_time} HS`)\n"
+                f"🚩 *[{league_info}] {home} vs {away}* (`{match_time} HS`)\n"
                 f"   • *Córners Estimados:* `{analytics['exp_corners']}` (Línea: *Más de 9.5*)\n"
                 f"   • *Tarjetas Estimadas:* `{analytics['exp_cards']}` (Línea: *Más de 4.5*)\n"
                 f"   • *Confianza Modelo:* `{analytics['confidence']}%`"
             )
-        response = f"🚩 *CÓRNERS Y TARJETAS - {label.upper()}*\n\n" + "\n\n---\n\n".join(projections)
+        response = f"🚩 *CÓRNERS Y TARJETAS - {league_name.upper()} ({label.upper()})*\n\n" + "\n\n---\n\n".join(projections)
         await query.message.reply_text(response, parse_mode="Markdown")
 
     elif category_code == "catcombo":
         if len(target_fixtures) < 2:
-            response = f"ℹ *No hay suficientes partidos pendientes el {label} para armar una combinada.*"
+            response = f"ℹ *No hay suficientes partidos pendientes el {label} en {league_name} para armar una combinada.*"
             await query.message.reply_text(response, parse_mode="Markdown")
         else:
             f1, f2 = target_fixtures[0], target_fixtures[1]
@@ -1244,7 +1296,7 @@ async def date_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             odds_type = "Real" if (a1["is_real_odds"] and a2["is_real_odds"]) else "Estimada"
 
             response = (
-                f"🧩 *COMBINADA DE VALOR (EV+) - {label.upper()}*\n\n"
+                f"🧩 *COMBINADA DE VALOR (EV+) - {league_name.upper()} ({label.upper()})*\n\n"
                 f"1️⃣ *{t1_h} vs {t1_a}*\n"
                 f"   📌 Selección: Victoria Local ({t1_h}) | Cuota: `{odds1:.2f}`\n\n"
                 f"2️⃣ *{t2_h} vs {t2_a}*\n"
@@ -1300,12 +1352,12 @@ async def user_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ---------------------------------------------------------
 # 16. Router de Menú Principal y Texto
 # ---------------------------------------------------------
-async def prompt_date_selection(update: Update, category_code: str, title: str):
-    text = f"🗓️ *Selecciona la jornada para {title}:*"
+async def prompt_league_selection(update: Update, category_code: str, title: str):
+    text = f"🌍 *Selecciona la liga o competición para {title}:*"
     await update.message.reply_text(
         text,
         parse_mode="Markdown",
-        reply_markup=get_date_inline_keyboard(category_code)
+        reply_markup=get_league_inline_keyboard(category_code)
     )
 
 async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1338,13 +1390,13 @@ async def text_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if "1X2 / Ganador" in text:
-        await prompt_date_selection(update, "cat1x2", "1X2 / Ganador")
+        await prompt_league_selection(update, "cat1x2", "1X2 / Ganador")
     elif "Goles & BTTS" in text:
-        await prompt_date_selection(update, "catgoals", "Goles & BTTS")
+        await prompt_league_selection(update, "catgoals", "Goles & BTTS")
     elif "Córners" in text:
-        await prompt_date_selection(update, "catcorners", "Córners & Tarjetas")
+        await prompt_league_selection(update, "catcorners", "Córners & Tarjetas")
     elif "Combinadas" in text:
-        await prompt_date_selection(update, "catcombo", "Combinadas EV+")
+        await prompt_league_selection(update, "catcombo", "Combinadas EV+")
     elif "Top Value" in text:
         await top_value_command(update, context)
     elif "Mis Estadísticas" in text:
@@ -1359,7 +1411,7 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     loading_msg = await update.message.reply_text("🔄 Filtrando los mejores picks +EV de la jornada...")
-    fixtures, status = await fetch_api_football_fixtures_by_date(get_target_date_str(0)[0])
+    fixtures, status = await fetch_api_football_fixtures_by_date(get_target_date_str(0)[0], "ALL")
     await loading_msg.delete()
 
     if not fixtures:
@@ -1381,6 +1433,7 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for fix in valid_fixtures[:3]:
         fid = fix.get("fixture", {}).get("id", 0)
         teams = fix.get("teams", {})
+        league_info = fix.get("league", {}).get("name", "Fútbol")
         home = teams.get("home", {}).get("name")
         away = teams.get("away", {}).get("name")
         
@@ -1394,7 +1447,7 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stake = calculate_kelly_stake(p_home, odds_home)
 
         pick_text = (
-            f"🔥 *{home} vs {away}* (`{match_time} HS`)\n"
+            f"🔥 *[{league_info}] {home} vs {away}* (`{match_time} HS`)\n"
             f"   • *Pick:* Victoria {home}\n"
             f"   • *Cuota [{odds_tag}]:* `{odds_home:.2f}` | *Prob. Dixon-Coles:* `{p_home*100:.1f}%`\n"
             f"   • *Ventaja Matemática (EV):* `+{max(ev, 0.03)*100:.1f}%` 💎\n"
@@ -1439,7 +1492,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # Hook asíncrono de inicialización (PTB v20+)
 async def post_init(application):
-    """Inicia la tarea de segundo plano en el bucle de eventos oficial del bot."""
     asyncio.create_task(auto_settlement_worker(application))
     logger.info("Task de Auto-Settlement iniciada correctamente en post_init.")
 
@@ -1457,7 +1509,6 @@ def main():
 
     logger.info("Inicializando NosticProno Bot...")
     
-    # Se añade el post_init para evitar el RuntimeError del asyncio event loop
     application = (
         ApplicationBuilder()
         .token(token_raw.strip())
@@ -1480,7 +1531,8 @@ def main():
     application.add_handler(CommandHandler("eliminar", eliminar_command))
 
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(adm_|stat_|savepick_)"))
-    application.add_handler(CallbackQueryHandler(date_callback_handler, pattern="^cat"))
+    application.add_handler(CallbackQueryHandler(league_callback_handler, pattern="^lg_"))
+    application.add_handler(CallbackQueryHandler(date_callback_handler, pattern="^dt_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_button_handler))
 
     application.add_error_handler(error_handler)
