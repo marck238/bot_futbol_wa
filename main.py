@@ -101,12 +101,26 @@ def init_db():
                 profit_units DOUBLE PRECISION DEFAULT 0.0
             )
         ''')
-        # Migración segura por si la tabla ya existía sin columnas
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(255);")
-            cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(255);")
-        except Exception:
-            conn.rollback()
+        # Migración automática segura para columnas faltantes en tablas preexistentes
+        columns_to_add = [
+            ("username", "VARCHAR(255)"),
+            ("first_name", "VARCHAR(255)"),
+            ("role", "VARCHAR(50) DEFAULT 'user'"),
+            ("is_active", "INT DEFAULT 1"),
+            ("created_at", "VARCHAR(100)"),
+            ("bets_count", "INT DEFAULT 0"),
+            ("wins", "INT DEFAULT 0"),
+            ("losses", "INT DEFAULT 0"),
+            ("profit_units", "DOUBLE PRECISION DEFAULT 0.0"),
+            ("email", "VARCHAR(255) UNIQUE"),
+            ("phone", "VARCHAR(100) UNIQUE"),
+            ("telegram_id", "BIGINT UNIQUE")
+        ]
+        for col_name, col_type in columns_to_add:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type};")
+            except Exception:
+                conn.rollback()
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_picks (
