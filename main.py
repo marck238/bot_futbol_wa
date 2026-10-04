@@ -128,7 +128,7 @@ def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_dr
         f"📊 <b>MERCADO 1X2 / GANADOR</b>\n\n"
         f"• 🏠 <b>Victoria Local:</b> {odds_home:.2f}  <code>({p_home*100:.1f}%)</code>\n"
         f"• 🤝 <b>Empate:</b> {odds_draw:.2f}  <code>({p_draw*100:.1f}%)</code>\n"
-        f"• ✈️️ <b>Victoria Visitante:</b> {odds_away:.2f}  <code>({p_away*100:.1f}%)</code>\n\n"
+        f"• ✈ <b>Victoria Visitante:</b> {odds_away:.2f}  <code>({p_away*100:.1f}%)</code>\n\n"
         f"🎯 <b>Acción Sugerida:</b>\n{recommendation}\n\n"
         f"💰 <b>Stake Kelly:</b> <code>{stake_pick}% de tu bankroll</code>\n"
         f"━━━━━━━━━━━━━━━━━━━"
@@ -206,12 +206,24 @@ def get_learning_calibration_factor():
 async def fetch_fixtures_from_api(date_str):
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
-    params = {"date": date_str}
+    # Forzamos la zona horaria de Uruguay para alinear las horas y el día correctamente
+    params = {"date": date_str, "timezone": "America/Montevideo"}
+    
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, headers=headers, params=params)
             if response.status_code == 200:
-                return response.json().get("response", [])
+                fixtures = response.json().get("response", [])
+                
+                # Filtro estricto: Omitir partidos finalizados (FT) o suspendidos
+                active_fixtures = []
+                for fix in fixtures:
+                    status_short = fix.get("fixture", {}).get("status", {}).get("short")
+                    # 'NS' = No iniciado, '1H', 'HT', '2H', 'ET', 'P', 'LIVE' = En juego
+                    if status_short in ["NS", "1H", "HT", "2H", "ET", "P", "LIVE"]:
+                        active_fixtures.append(fix)
+                
+                return active_fixtures if active_fixtures else []
     except Exception as e:
         logger.error(f"Error consultando API-Football: {e}")
     return []
@@ -358,7 +370,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando partidos para Goles ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
         for fix in fixtures[:5]:
@@ -383,7 +395,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando partidos para 1X2 ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
         for fix in fixtures[:5]:
@@ -408,7 +420,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
         for fix in fixtures[:5]:
