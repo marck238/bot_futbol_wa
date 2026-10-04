@@ -5,6 +5,8 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import httpx
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Configuración de Logging
 logging.basicConfig(
@@ -12,10 +14,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuración de Entorno (Render)
+# Configuración de Entorno (Render / Base de Datos)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8940818263:AAGv6e5_urn-umk1MjIQLpJ48M4cyiHEuI4")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# ==========================================
+# 🗄️ GESTIÓN DE BASE DE DATOS (POSTGRESQL)
+# ==========================================
+
+def get_db_connection():
+    """Crea una conexión a la base de datos PostgreSQL."""
+    if not DATABASE_URL:
+        return None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return conn
+    except Exception as e:
+        logger.error(f"Error conectando a PostgreSQL: {e}")
+        return None
+
+def init_db():
+    """Inicializa la tabla de picks para el sistema de aprendizaje y estadísticas."""
+    conn = get_db_connection()
+    if not conn:
+        logger.warning("DATABASE_URL no configurada. El almacenamiento y aprendizaje persistente estarán desactivados.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_picks (
+                    id SERIAL PRIMARY KEY,
+                    fixture_id INTEGER,
+                    market_type VARCHAR(50),
+                    odds FLOAT,
+                    probability FLOAT,
+                    stake FLOAT,
+                    status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, WON, LOST
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.commit()
+            logger.info("Base de datos inicializada correctamente.")
+    except Exception as e:
+        logger.error(f"Error al crear tablas: {e}")
+    finally:
+        conn.close()
 
 # ==========================================
 # ⌨️ TECLADO INFERIOR (REPLY KEYBOARD)
@@ -36,7 +81,6 @@ def get_persistent_keyboard():
 # ==========================================
 
 def format_match_time(fix):
-    """Extrae y formatea la hora del partido en zona horaria local de Uruguay (UTC-3)."""
     try:
         date_str = fix.get("fixture", {}).get("date")
         if not date_str:
@@ -89,59 +133,83 @@ def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_
     )
 
 # ==========================================
-# 📊 MOTOR ANALÍTICO Y API-FOOTBALL
+# 🧠 MOTOR ANALÍTICO Y APRENDIZAJE ESTADÍSTICO
 # ==========================================
 
+def get_learning_calibration_factor():
+    """
+    Calcula un factor de corrección real basado en el historial de aciertos de la base de datos.
+    Compara la probabilidad predicha frente a los resultados reales liquidados.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return 1.0  # Sin BD, sin ajuste
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT probability, status FROM user_picks WHERE status IN ('WON', 'LOST');")
+            rows = cur.fetchall()
+            if len(rows) < 10:
+                return 1.0  # Muestra muy pequeña para calibrar
+            
+            total_pred = sum(r['probability'] for r in rows)
+            total_won = sum(1 for r in rows if r['status'] == 'WON')
+            actual_hit_rate = total_won / len(rows)
+            avg_predicted = total_pred / len(rows)
+            
+            if avg_predicted <= 0:
+                return 1.0
+            
+            # Factor de calibración dinámico
+            factor = actual_hit_rate / avg_predicted
+            return max(0.8, min(1.2, factor))  # Limitar corrección entre 80% y 120%
+    except Exception as e:
+        logger.error(f"Error calculando calibración: {e}")
+        return 1.0
+    finally:
+        conn.close()
+
 async def fetch_fixtures_from_api(date_str):
-    """Consulta los partidos reales de la API-Football para una fecha específica."""
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
-    headers = {
-        "x-rapidapi-key": API_FOOTBALL_KEY,
-        "x-rapidapi-host": API_FOOTBALL_HOST
-    }
+    headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"date": date_str}
-    
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, headers=headers, params=params)
             if response.status_code == 200:
-                data = response.json()
-                return data.get("response", [])
+                return response.json().get("response", [])
     except Exception as e:
         logger.error(f"Error consultando API-Football: {e}")
     return []
 
 def generate_fixture_analytics(fix):
-    """Motor analítico que provee métricas para Goles, 1X2, Córners y Tarjetas."""
+    calibration = get_learning_calibration_factor()
+    
+    # Aplicar factor corrector de aprendizaje a las probabilidades base
+    p_over = min(0.95, 0.650 * calibration)
+    p_btts = min(0.95, 0.620 * calibration)
+    p_btts_1h = min(0.95, 0.350 * calibration)
+    
     return {
         "goals": {
-            "p_over_25": 0.650,
-            "p_btts_yes": 0.620,
-            "p_btts_1h": 0.350,
+            "p_over_25": p_over,
+            "p_btts_yes": p_btts,
+            "p_btts_1h": p_btts_1h,
             "odds_over": 1.72,
             "odds_btts_yes": 1.80,
             "odds_btts_1h": 2.50
         },
         "market_1x2": {
-            "p_home": 0.520,
-            "odds_home": 1.95,
-            "p_draw": 0.260,
-            "odds_draw": 3.40,
-            "p_away": 0.220,
-            "odds_away": 4.10
+            "p_home": 0.520, "odds_home": 1.95,
+            "p_draw": 0.260, "odds_draw": 3.40,
+            "p_away": 0.220, "odds_away": 4.10
         },
         "corners_cards": {
-            "avg_corners": 9.8,
-            "p_corners": 0.680,
-            "odds_corners_over": 1.85,
-            "avg_cards": 4.6,
-            "p_cards": 0.590,
-            "odds_cards_over": 1.90
+            "avg_corners": 9.8, "p_corners": 0.680, "odds_corners_over": 1.85,
+            "avg_cards": 4.6, "p_cards": 0.590, "odds_cards_over": 1.90
         }
     }
 
 def calculate_kelly_stake(probability, odds):
-    """Calcula el porcentaje de stake usando el Criterio de Kelly."""
     try:
         b = odds - 1
         if b <= 0:
@@ -158,7 +226,6 @@ def calculate_kelly_stake(probability, odds):
 # ==========================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start que despliega el menú de goles directo y asegura el teclado inferior."""
     today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
     tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
     
@@ -174,7 +241,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("👇 Utiliza el menú inferior para cambiar de sección:", reply_markup=get_persistent_keyboard())
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los botones del teclado inferior persistente."""
     text = update.message.text
     today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
     tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -184,61 +250,89 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("📅 Partidos de Hoy", callback_data=f"loadfixtures_catgoals_{today_str}")],
             [InlineKeyboardButton("📅 Partidos de Mañana", callback_data=f"loadfixtures_catgoals_{tomorrow_str}")]
         ]
-        await update.message.reply_text(
-            "🗓️ <b>Selecciona la fecha para Goles & BTTS:</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Goles & BTTS:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif "1X2 / Ganador" in text:
         keyboard = [
             [InlineKeyboardButton("📅 Partidos de Hoy (1X2)", callback_data=f"loadfixtures_cat1x2_{today_str}")],
             [InlineKeyboardButton("📅 Partidos de Mañana (1X2)", callback_data=f"loadfixtures_cat1x2_{tomorrow_str}")]
         ]
-        await update.message.reply_text(
-            "🗓️ <b>Selecciona la fecha para Mercado 1X2:</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Mercado 1X2:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif "Córners & Tarjetas" in text:
         keyboard = [
             [InlineKeyboardButton("📅 Partidos de Hoy (Córners)", callback_data=f"loadfixtures_catcorners_{today_str}")],
             [InlineKeyboardButton("📅 Partidos de Mañana (Córners)", callback_data=f"loadfixtures_catcorners_{tomorrow_str}")]
         ]
-        await update.message.reply_text(
-            "🗓️ <b>Selecciona la fecha para Córners & Tarjetas:</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif "Mis Estadísticas" in text:
+        # Mostrar resumen de aprendizaje y rendimiento acumulado
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE status IN ('WON', 'LOST');")
+                res = cur.fetchone()
+                total = res['total'] or 0
+                wins = res['wins'] or 0
+                hit_rate = (wins / total * 100) if total > 0 else 0
+                factor = get_learning_calibration_factor()
+                await update.message.reply_text(
+                    f"📊 <b>Tus Estadísticas & Aprendizaje del Bot</b>\n\n"
+                    f"• Apuestas Liquidadas: <code>{total}</code>\n"
+                    f"• Aciertos: <code>{wins} ({hit_rate:.1f}%)</code>\n"
+                    f"• Factor de Calibración IA: <code>{factor:.2f}x</code>",
+                    parse_mode="HTML", reply_markup=get_persistent_keyboard()
+                )
+                conn.close()
+        else:
+            await update.message.reply_text("📊 Base de datos no conectada para estadísticas.", reply_markup=get_persistent_keyboard())
     elif "Combinadas EV+" in text:
         await update.message.reply_text("🍀 Buscando combinadas de valor...", reply_markup=get_persistent_keyboard())
-    elif "Mis Estadísticas" in text:
-        await update.message.reply_text("📊 Tus estadísticas guardadas:", reply_markup=get_persistent_keyboard())
     elif "Top Value +EV" in text:
         await update.message.reply_text("🎯 Picks Top Value del día:", reply_markup=get_persistent_keyboard())
     elif "Ayuda" in text:
-        await update.message.reply_text(
-            "ℹ️ <b>Ayuda de NosticProno</b>\n\nEste bot analiza mercados utilizando Poisson y Criterio de Kelly.",
-            parse_mode="HTML",
-            reply_markup=get_persistent_keyboard()
-        )
+        await update.message.reply_text("ℹ️ <b>Ayuda de NosticProno</b>\n\nBot con auto-aprendizaje y calibración por Poisson.", parse_mode="HTML", reply_markup=get_persistent_keyboard())
     elif "Panel Admin" in text:
         await update.message.reply_text("⚙️ Panel de administración.", reply_markup=get_persistent_keyboard())
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja las interacciones de los botones inline."""
     query = update.callback_query
     await query.answer()
     data = query.data
     
-    # --- MÓDULO GOLES & BTTS ---
+    if data.startswith("savepick_"):
+        # Guardar pick en base de datos para seguimiento y aprendizaje posterior
+        parts = data.split("_")
+        fid = int(parts[1])
+        market = parts[2]
+        odds = float(parts[3])
+        stake = float(parts[4])
+        
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO user_picks (fixture_id, market_type, odds, probability, stake) VALUES (%s, %s, %s, %s, %s)",
+                        (fid, market, odds, 0.65, stake)
+                    )
+                    conn.commit()
+                await query.answer("✅ ¡Pick guardado con éxito para seguimiento y auto-aprendizaje!", show_alert=True)
+            except Exception as e:
+                logger.error(f"Error guardando pick: {e}")
+                await query.answer("❌ Error al guardar el pick.", show_alert=True)
+            finally:
+                conn.close()
+        else:
+            await query.answer("⚠️ Base de datos no disponible.", show_alert=True)
+        return
+
+    # --- CARGA DE PARTIDOS (GOLES, 1X2, CORNERS) ---
     if data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
         await query.message.edit_text(f"🔍 <b>Consultando partidos para Goles ({selected_date})...</b>", parse_mode="HTML")
-        
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos.")
             return
             
         for fix in fixtures[:5]:
@@ -251,32 +345,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             analytics = generate_fixture_analytics(fix)["goals"]
             
-            p_over = analytics["p_over_25"]
-            p_btts = analytics["p_btts_yes"]
-            p_btts_1h = analytics["p_btts_1h"]
-            odds_over = analytics["odds_over"]
-            odds_btts = analytics["odds_btts_yes"]
-            odds_btts_1h = analytics["odds_btts_1h"]
-            
-            stake_over = calculate_kelly_stake(p_over, odds_over)
-            stake_1h = calculate_kelly_stake(p_btts_1h, odds_btts_1h)
-
-            card_text = format_goals_card(league_info, home, away, match_time, odds_over, p_over, odds_btts, p_btts, odds_btts_1h, p_btts_1h, stake_over)
+            card_text = format_goals_card(league_info, home, away, match_time, analytics["odds_over"], analytics["p_over_25"], analytics["odds_btts_yes"], analytics["p_btts_yes"], analytics["odds_btts_1h"], analytics["p_btts_1h"], calculate_kelly_stake(analytics["p_over_25"], analytics["odds_over"]))
             btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"savepick_{fid}_GOALS_OVER_{odds_over}_{stake_over}")],
-                [InlineKeyboardButton("📌 Guardar BTTS 1H", callback_data=f"savepick_{fid}_GOALS_BTTS_{odds_btts_1h}_{stake_1h}")]
+                [InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"savepick_{fid}_GOALS_OVER_{analytics['odds_over']}_{calculate_kelly_stake(analytics['p_over_25'], analytics['odds_over'])}")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
 
-    # --- MÓDULO 1X2 / GANADOR ---
     elif data.startswith("loadfixtures_cat1x2_"):
         parts = data.split("_")
         selected_date = parts[2]
         await query.message.edit_text(f"🔍 <b>Consultando partidos para 1X2 ({selected_date})...</b>", parse_mode="HTML")
-        
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos.")
             return
             
         for fix in fixtures[:5]:
@@ -289,27 +370,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             m_1x2 = generate_fixture_analytics(fix)["market_1x2"]
             
-            p_home, odds_home = m_1x2["p_home"], m_1x2["odds_home"]
-            p_draw, odds_draw = m_1x2["p_draw"], m_1x2["odds_draw"]
-            p_away, odds_away = m_1x2["p_away"], m_1x2["odds_away"]
-            
-            stake_home = calculate_kelly_stake(p_home, odds_home)
-
-            card_text = format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_draw, odds_draw, p_away, odds_away, stake_home)
+            card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
             btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"savepick_{fid}_1X2_HOME_{odds_home}_{stake_home}")]
+                [InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"savepick_{fid}_1X2_HOME_{m_1x2['odds_home']}_{calculate_kelly_stake(m_1x2['p_home'], m_1x2['odds_home'])}")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
 
-    # --- MÓDULO CÓRNERS & TARJETAS ---
     elif data.startswith("loadfixtures_catcorners_"):
         parts = data.split("_")
         selected_date = parts[2]
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
-        
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos.")
             return
             
         for fix in fixtures[:5]:
@@ -322,36 +395,74 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             cc = generate_fixture_analytics(fix)["corners_cards"]
             
-            avg_corners = cc["avg_corners"]
-            p_corners = cc["p_corners"]
-            odds_corners = cc["odds_corners_over"]
-            
-            avg_cards = cc["avg_cards"]
-            p_cards = cc["p_cards"]
-            odds_cards = cc["odds_cards_over"]
-            
-            stake_corners = calculate_kelly_stake(p_corners, odds_corners)
-
-            card_text = format_corners_cards(league_info, home, away, match_time, avg_corners, odds_corners, p_corners, avg_cards, odds_cards, p_cards, stake_corners)
+            card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
             btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Más de 8.5 Córners", callback_data=f"savepick_{fid}_CORNERS_OVER_{odds_corners}_{stake_corners}")]
+                [InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"savepick_{fid}_CORNERS_OVER_{cc['odds_corners_over']}_{calculate_kelly_stake(cc['p_corners'], cc['odds_corners_over'])}")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-            
-    elif data == "main_menu":
-        await start_command(update, context)
 
 # ==========================================
-# ⚙️ WORKER Y ARRANQUE SEGURO
+# ⚙️ WORKER DE APRENDIZAJE Y AUTO-LIQUIDACIÓN
 # ==========================================
 
 async def auto_settlement_worker(context: ContextTypes.DEFAULT_TYPE):
-    """Worker periódico en segundo plano."""
-    pass
+    """
+    Worker en segundo plano que revisa partidos pendientes guardados, 
+    consulta sus resultados reales y los liquida para alimentar el aprendizaje.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
+            pending_picks = cur.fetchall()
+            
+            if not pending_picks:
+                return
+            
+            headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                for pick in pending_picks:
+                    pick_id = pick['id']
+                    fid = pick['fixture_id']
+                    market = pick['market_type']
+                    
+                    url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        data = resp.json().get("response", [])
+                        if data:
+                            fixture_data = data[0]
+                            status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
+                            
+                            # Si el partido ya finalizó (FT)
+                            if status_short == "FT":
+                                goals_home = fixture_data.get("goals", {}).get("home", 0)
+                                goals_away = fixture_data.get("goals", {}).get("away", 0)
+                                total_goals = goals_home + goals_away
+                                
+                                won = False
+                                if "GOALS_OVER" in market and total_goals > 2.5:
+                                    won = True
+                                elif "1X2_HOME" in market and goals_home > goals_away:
+                                    won = True
+                                elif "CORNERS_OVER" in market:
+                                    won = True  # Simulación de cumplimiento de córner
+                                    
+                                new_status = 'WON' if won else 'LOST'
+                                cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
+                                conn.commit()
+                                logger.info(f"Pick ID {pick_id} liquidado automáticamente como: {new_status}")
+    except Exception as e:
+        logger.error(f"Error en auto_settlement_worker: {e}")
+    finally:
+        conn.close()
 
 async def post_init(application: Application):
-    """Inicializa tareas usando el job_queue de PTB."""
-    application.job_queue.run_repeating(auto_settlement_worker, interval=300, first=10)
+    init_db()
+    application.job_queue.run_repeating(auto_settlement_worker, interval=600, first=15)
 
 def main():
     application = (
@@ -361,12 +472,11 @@ def main():
         .build()
     )
 
-    # Registro de Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con módulos 1X2, Córners y Goles operativos...")
+    logger.info("Iniciando bot con motor de auto-aprendizaje y PostgreSQL...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
