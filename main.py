@@ -206,6 +206,7 @@ def get_learning_calibration_factor():
         conn.close()
 
 async def fetch_fixtures_from_api(date_str):
+    async def fetch_fixtures_from_api(date_str):
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"date": date_str, "timezone": "America/Montevideo"}
@@ -217,10 +218,18 @@ async def fetch_fixtures_from_api(date_str):
                 fixtures = response.json().get("response", [])
                 
                 active_fixtures = []
+                now_utc = datetime.now(timezone.utc)
+                
                 for fix in fixtures:
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
-                    if status_short in ["NS", "1H", "HT", "2H", "ET", "P", "LIVE"]:
-                        active_fixtures.append(fix)
+                    date_iso = fix.get("fixture", {}).get("date")
+                    
+                    # Criterio estricto: Solo partidos que no han comenzado (NS) 
+                    # y cuya fecha/hora programada sea en el futuro.
+                    if status_short == "NS" and date_iso:
+                        fix_dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
+                        if fix_dt > now_utc:
+                            active_fixtures.append(fix)
                 
                 return active_fixtures if active_fixtures else []
     except Exception as e:
