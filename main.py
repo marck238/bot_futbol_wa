@@ -223,8 +223,6 @@ async def fetch_fixtures_from_api(date_str):
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
                     date_iso = fix.get("fixture", {}).get("date")
                     
-                    # Criterio estricto: Solo partidos que no han comenzado (NS) 
-                    # y cuya fecha/hora programada sea en el futuro.
                     if status_short == "NS" and date_iso:
                         fix_dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
                         if fix_dt > now_utc:
@@ -371,7 +369,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠ Base de datos no disponible.", show_alert=True)
         return
 
-    if data.startswith("loadfixtures_catgoals_"):
+    elif data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
         await query.message.edit_text(f"🔍 <b>Consultando partidos para Goles ({selected_date})...</b>", parse_mode="HTML")
@@ -380,10 +378,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:5]:
+        for fix in fixtures[:7]: # Mostramos hasta 7 partidos organizados
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
-            league_info = fix.get("league", {}).get("name", "Fútbol")
+            league = fix.get("league", {})
+            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
             
@@ -405,10 +404,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:5]:
+        for fix in fixtures[:7]:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
-            league_info = fix.get("league", {}).get("name", "Fútbol")
+            league = fix.get("league", {})
+            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
             
@@ -427,13 +427,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:5]:
+        for fix in fixtures[:7]:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
-            league_info = fix.get("league", {}).get("name", "Fútbol")
+            league = fix.get("league", {})
+            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
             
