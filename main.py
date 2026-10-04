@@ -75,7 +75,6 @@ async def fetch_fixtures_from_api(date_str):
 
 def generate_fixture_analytics(fix):
     """Calcula o simula métricas basadas en estadísticas de los equipos."""
-    # Aquí se integra tu lógica de Poisson / Cuotas
     return {
         "metrics": {
             "p_over_25": 0.650,
@@ -129,7 +128,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == "menu_date_catgoals":
-        # Mostrar selector de fechas (Hoy, Mañana)
         today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
         tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
         
@@ -156,7 +154,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ No se encontraron partidos disponibles para esta fecha en la API.")
             return
             
-        # Tomamos los primeros 5 partidos como ejemplo para no saturar el chat
         for fix in fixtures[:5]:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
@@ -205,20 +202,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ==========================================
-# ⚙️ WORKER Y ARRANQUE
+# ⚙️️ WORKER Y ARRANQUE SEGURO
 # ==========================================
 
-async def auto_settlement_worker():
-    while True:
-        try:
-            await asyncio.sleep(300)
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            await asyncio.sleep(60)
+async def auto_settlement_worker(context: ContextTypes.DEFAULT_TYPE):
+    """Worker periódico en segundo plano."""
+    pass
 
 async def post_init(application: Application):
-    application.create_task(auto_settlement_worker())
+    """Inicializa tareas usando el job_queue de PTB para evitar advertencias."""
+    application.job_queue.run_repeating(auto_settlement_worker, interval=300, first=10)
 
 def main():
     application = (
