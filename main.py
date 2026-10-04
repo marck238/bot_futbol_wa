@@ -7,6 +7,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import httpx
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # Configuración de Logging
 logging.basicConfig(
@@ -15,11 +17,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuración de Entorno (Render / Base de Datos)
-# Se deja vacío por defecto para forzar el uso correcto de las variables de entorno seguras
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# ==========================================
+# 🌐 SERVIDOR HTTP PARA EL HEALTH CHECK DE RENDER
+# ==========================================
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"NosticProno Bot is alive and running!")
+    
+    def log_message(self, format, *args):
+        # Silencia los logs HTTP repetitivos para mantener limpia la consola
+        return
+
+def run_health_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Servidor HTTP de salud activo en el puerto {port}")
+    server.serve_forever()
 
 # ==========================================
 # 🗄️ GESTIÓN DE BASE DE DATOS (POSTGRESQL)
@@ -248,7 +269,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("📅 Partidos de Hoy (Córners)", callback_data=f"loadfixtures_catcorners_{today_str}")],
             [InlineKeyboardButton("📅 Partidos de Mañana (Córners)", callback_data=f"loadfixtures_catcorners_{tomorrow_str}")]
         ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("🗓️️ <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif "Mis Estadísticas" in text:
         conn = get_db_connection()
         if conn:
@@ -306,7 +327,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 conn.close()
         else:
-            await query.answer("⚠️ Base de datos no disponible.", show_alert=True)
+            await query.answer("⚠️️ Base de datos no disponible.", show_alert=True)
         return
 
     if data.startswith("loadfixtures_catgoals_"):
@@ -429,7 +450,7 @@ async def auto_settlement_background_task():
                                         won = True
                                     elif "CORNERS_OVER" in market:
                                         won = True
-                                        
+                                    
                                     new_status = 'WON' if won else 'LOST'
                                     cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
                                     conn.commit()
@@ -448,6 +469,9 @@ def main():
         logger.error("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está configurada.")
         return
 
+    # Iniciar el servidor HTTP de salud en un hilo separado para Render
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -460,7 +484,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
     logger.info("Iniciando bot con worker asíncrono y PostgreSQL...")
-    # drop_pending_updates=True descarta peticiones viejas colgadas para evitar conflicto
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
