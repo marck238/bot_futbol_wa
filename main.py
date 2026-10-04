@@ -155,7 +155,6 @@ def format_goals_card(league_info, home, away, match_time, odds_over, p_over, od
         f"💰 <b>Stake Kelly (Over 2.5):</b> <code>{stake_over}% de tu bankroll</code>\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
-
 def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_corners_over, p_corners, avg_cards, odds_cards_over, p_cards, stake_corners):
     if p_corners >= 0.65:
         recommendation = "✅ **Entrar a Más de 8.5 Córners**\n💡 <i>Estilos de juego con alta generación de saques de esquina.</i>"
