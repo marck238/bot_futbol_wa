@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -77,6 +77,8 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Asegura que la columna probability exista si la tabla ya fue creada previamente
+            cur.execute("ALTER TABLE user_picks ADD COLUMN IF NOT EXISTS probability FLOAT;")
             conn.commit()
             logger.info("Base de datos inicializada correctamente.")
     except Exception as e:
@@ -206,7 +208,6 @@ def get_learning_calibration_factor():
 async def fetch_fixtures_from_api(date_str):
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
-    # Forzamos la zona horaria de Uruguay para alinear las horas y el día correctamente
     params = {"date": date_str, "timezone": "America/Montevideo"}
     
     try:
@@ -215,11 +216,9 @@ async def fetch_fixtures_from_api(date_str):
             if response.status_code == 200:
                 fixtures = response.json().get("response", [])
                 
-                # Filtro estricto: Omitir partidos finalizados (FT) o suspendidos
                 active_fixtures = []
                 for fix in fixtures:
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
-                    # 'NS' = No iniciado, '1H', 'HT', '2H', 'ET', 'P', 'LIVE' = En juego
                     if status_short in ["NS", "1H", "HT", "2H", "ET", "P", "LIVE"]:
                         active_fixtures.append(fix)
                 
@@ -420,7 +419,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️️ No se encontraron partidos pendientes para esta fecha.")
             return
             
         for fix in fixtures[:5]:
