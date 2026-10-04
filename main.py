@@ -335,6 +335,19 @@ async def generate_fixture_analytics_real(fix):
     odds_over = round(margin / max(0.05, p_over), 2)
     odds_btts = round(margin / max(0.05, p_btts), 2)
 
+    # --- CÁLCULO DINÁMICO DE CÓRNERS & TARJETAS BASADO EN INTENSIDAD ---
+    # Usamos la suma de lambdas ofensivas para estimar córners de forma variable por encuentro
+    offensive_intensity = lambda_home + lambda_away
+    avg_corners = round(8.0 + (offensive_intensity * 1.2), 1)
+    
+    # Probabilidad variable según los córners estimados
+    p_corners = min(0.85, max(0.45, 0.50 + ((avg_corners - 8.5) * 0.05)))
+    odds_corners_over = round(margin / max(0.05, p_corners), 2)
+
+    avg_cards = round(3.8 + (abs(lambda_home - lambda_away) * 0.8), 1)
+    p_cards = min(0.80, max(0.40, 0.55 + ((avg_cards - 4.5) * 0.04)))
+    odds_cards_over = round(margin / max(0.05, p_cards), 2)
+
     return {
         "goals": {
             "p_over_25": p_over, "p_btts_yes": p_btts, "p_btts_1h": p_btts_1h,
@@ -346,8 +359,8 @@ async def generate_fixture_analytics_real(fix):
             "p_away": p_away, "odds_away": odds_away
         },
         "corners_cards": {
-            "avg_corners": 9.8, "p_corners": 0.680, "odds_corners_over": 1.85,
-            "avg_cards": 4.6, "p_cards": 0.590, "odds_cards_over": 1.90
+            "avg_corners": avg_corners, "p_corners": p_corners, "odds_corners_over": odds_corners_over,
+            "avg_cards": avg_cards, "p_cards": p_cards, "odds_cards_over": odds_cards_over
         }
     }
 
