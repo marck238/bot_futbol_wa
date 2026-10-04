@@ -275,7 +275,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif "Ayuda" in text:
         await update.message.reply_text("ℹ️ <b>Ayuda de NosticProno</b>\n\nBot con auto-aprendizaje y calibración por Poisson.", parse_mode="HTML", reply_markup=get_persistent_keyboard())
     elif "Panel Admin" in text:
-        await update.message.reply_text("⚙️ Panel de administración.", reply_markup=get_persistent_keyboard())
+        await update.message.reply_text("⚙️️ Panel de administración.", reply_markup=get_persistent_keyboard())
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -364,7 +364,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️️ No se encontraron partidos.")
+            await query.message.reply_text("⚠️ No se encontraron partidos.")
             return
             
         for fix in fixtures[:5]:
@@ -418,7 +418,7 @@ async def auto_settlement_background_task():
                                 status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
                                 if status_short == "FT":
                                     goals_home = fixture_data.get("goals", {}).get("home", 0)
-                                    goals_away = fixture_data.get("goals", {}).get("home", 0) # Corregido goals_away
+                                    goals_away = fixture_data.get("goals", {}).get("away", 0)
                                     total_goals = goals_home + goals_away
                                     
                                     won = False
