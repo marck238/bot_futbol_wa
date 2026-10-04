@@ -469,13 +469,65 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
     elif "Combinadas EV+" in text:
-        await update.message.reply_text("🍀 Buscando combinadas de valor...", reply_markup=get_persistent_keyboard())
-    elif "Top Value +EV" in text:
-        await update.message.reply_text("🎯 Picks Top Value del día:", reply_markup=get_persistent_keyboard())
-    elif "Ayuda" in text:
-        await update.message.reply_text("ℹ️ <b>Ayuda de NosticProno</b>\n\nBot con auto-aprendizaje y calibración por Poisson.", parse_mode="HTML", reply_markup=get_persistent_keyboard())
-    elif "Panel Admin" in text:
-        await update.message.reply_text("⚙ Panel de administración.", reply_markup=get_persistent_keyboard())
+    await update.message.reply_text("🍀 Analizando el mercado y buscando las mejores opciones para tu combinada...", reply_markup=get_persistent_keyboard())
+    
+    try:
+        # Simulamos la obtención de los partidos del día (puedes usar tu función de fixtures reales)
+        fixtures_data = await fetch_fixtures_for_date("2026-10-04") # O usa fecha actual dinámicamente
+        
+        candidates = []
+        for fix in fixtures_data[:10]: # Analizamos los primeros partidos del día
+            analysis = await generate_fixture_analytics_real(fix)
+            h_name = fix.get("teams", {}).get("home", {}).get("name", "Local")
+            a_name = fix.get("teams", {}).get("away", {}).get("name", "Visita")
+            league_name = fix.get("league", {}).get("name", "Liga")
+            
+            # Evaluamos mercados candidatos (ej: Goles Over 2.5 o 1X2 seguro)
+            p_over = analysis["goals"]["p_over_25"]
+            odds_over = analysis["goals"]["odds_over"]
+            if p_over >= 0.60:
+                candidates.append({
+                    "match": f"{h_name} vs {a_name}",
+                    "league": league_name,
+                    "market": "Más de 2.5 Goles",
+                    "probability": p_over,
+                    "odds": odds_over
+                })
+                
+        # Si tenemos suficientes candidatos, armamos la combinada de 2 o 3 selecciones
+        if len(candidates) >= 2:
+            # Seleccionamos los 2 o 3 con mayor probabilidad
+            candidates = sorted(candidates, key=lambda x: x["probability"], reverse=True)[:3]
+            
+            combined_odds = 1.0
+            parlay_text = "🍀 **COMBINADA DEL DÍA (+EV)** 🍀\n━━━━━━━━━━━━━━━━━━━\n"
+            
+            for i, item in enumerate(candidates, 1):
+                combined_odds *= item["odds"]
+                parlay_text += f"**{i}. {item['match']}**\n"
+                parlay_text += f"   📌 *Mercado:* {item['market']}\n"
+                parlay_text += f"   📊 *Prob:* {int(item['probability']*100)}% | *Cuota:* {item['odds']}\n\n"
+            
+            combined_odds = round(combined_odds, 2)
+            suggested_stake = "1% a 2% (Stake bajo por ser combinada)"
+            
+            parlay_text += f"━━━━━━━━━━━━━━━━━━━\n"
+            parlay_text += f"🔥 **Cuota Combinada Total:** `{combined_odds}`\n"
+            parlay_text += f"💰 **Stake Sugerido:** {suggested_stake}\n"
+            parlay_text += f"💡 *Consejo:* Las combinadas multiplican el riesgo, mantén una gestión de bankroll estricta."
+            
+            await update.message.reply_text(parlay_text, parse_mode="Markdown", reply_markup=get_persistent_keyboard())
+        else:
+            await update.message.reply_text(
+                "⚠️ No se encontraron suficientes partidos con alta probabilidad (`+EV`) para armar una combinada sólida en este momento. ¡Inténtalo más tarde!",
+                reply_markup=get_persistent_keyboard()
+            )
+            
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Ocurrió un error al generar la combinada: {str(e)}",
+            reply_markup=get_persistent_keyboard()
+        )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
