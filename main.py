@@ -34,7 +34,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"NosticProno Bot is alive and running!")
     
     def log_message(self, format, *args):
-        # Silencia los logs HTTP repetitivos para mantener limpia la consola
         return
 
 def run_health_server():
@@ -234,11 +233,9 @@ async def fetch_fixtures_from_api(date_str):
     return []
 
 def poisson_probability(lmbda, k):
-    """Calcula la probabilidad de Poisson para k goles dado un promedio esperado lmbda."""
     return (math.pow(lmbda, k) * math.exp(-lmbda)) / math.factorial(k)
 
 def calculate_match_probabilities(lambda_home, lambda_away):
-    """Calcula la matriz de probabilidades 1X2, Over 2.5 y BTTS usando Poisson."""
     p_home_win = 0.0
     p_draw = 0.0
     p_away_win = 0.0
@@ -275,7 +272,6 @@ def calculate_match_probabilities(lambda_home, lambda_away):
     }
 
 async def fetch_team_statistics(team_id, league_id, season="2026"):
-    """Consulta las estadísticas reales de la temporada de un equipo en API-Football."""
     url = f"https://{API_FOOTBALL_HOST}/teams/statistics"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"team": team_id, "league": league_id, "season": season}
@@ -412,20 +408,50 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif "Mis Estadísticas" in text:
         conn = get_db_connection()
         if conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE status IN ('WON', 'LOST');")
-                res = cur.fetchone()
-                total = res['total'] or 0
-                wins = res['wins'] or 0
-                hit_rate = (wins / total * 100) if total > 0 else 0
-                factor = get_learning_calibration_factor()
-                await update.message.reply_text(
-                    f"📊 <b>Tus Estadísticas & Aprendizaje del Bot</b>\n\n"
-                    f"• Apuestas Liquidadas: <code>{total}</code>\n"
-                    f"• Aciertos: <code>{wins} ({hit_rate:.1f}%)</code>\n"
-                    f"• Factor de Calibración IA: <code>{factor:.2f}x</code>",
-                    parse_mode="HTML", reply_markup=get_persistent_keyboard()
-                )
+            try:
+                with conn.cursor() as cur:
+                    # Estadísticas Generales
+                    cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE status IN ('WON', 'LOST');")
+                    res = cur.fetchone()
+                    total = res['total'] or 0
+                    wins = res['wins'] or 0
+                    hit_rate = (wins / total * 100) if total > 0 else 0
+                    factor = get_learning_calibration_factor()
+
+                    # Desglose Avanzado por Mercado
+                    cur.execute("""
+                        SELECT market_type, 
+                               COUNT(*) as total_m, 
+                               SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins_m
+                        FROM user_picks 
+                        WHERE status IN ('WON', 'LOST') 
+                        GROUP BY market_type;
+                    """)
+                    market_rows = cur.fetchall()
+
+                    breakdown_text = ""
+                    for row in market_rows:
+                        m_type = row['market_type']
+                        m_total = row['total_m']
+                        m_wins = row['wins_m']
+                        m_rate = (m_wins / m_total * 100) if m_total > 0 else 0
+                        breakdown_text += f"  • <code>{m_type}</code>: <b>{m_wins}/{m_total}</b> aciertos ({m_rate:.1f}%)\n"
+
+                    if not breakdown_text:
+                        breakdown_text = "  <i>Sin apuestas liquidadas aún.</i>"
+
+                    await update.message.reply_text(
+                        f"📊 <b>ESTADÍSTICAS & RENDIMIENTO AVANZADO</b>\n\n"
+                        f"• Apuestas Totales Liquidadas: <code>{total}</code>\n"
+                        f"• Aciertos Globales: <code>{wins} ({hit_rate:.1f}%)</code>\n"
+                        f"• Factor Calibración IA: <code>{factor:.2f}x</code>\n\n"
+                        f"📈 <b>Desglose por Mercado:</b>\n{breakdown_text}",
+                        parse_mode="HTML", reply_markup=get_persistent_keyboard()
+                    )
+            except Exception as e:
+                logger.error(f"Error generando estadísticas avanzadas: {e}")
+                await update.message.reply_text("❌ Error al consultar las estadísticas.", reply_markup=get_persistent_keyboard())
+            finally:
                 conn.close()
         else:
             await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
@@ -472,13 +498,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
-        await query.message.edit_text(f"🔍 <b>Consultando partidos para Goles ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos de Goles ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:7]:
+        shown_count = 0
+        for fix in fixtures:
+            if shown_count >= 5:
+                break
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             league = fix.get("league", {})
@@ -489,22 +518,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             analytics = (await generate_fixture_analytics_real(fix))["goals"]
             
+            # FILTRO DE VALOR: Solo mostrar si la cuota es >= 1.55 o probabilidad >= 55%
+            if analytics["odds_over"] < 1.55:
+                continue
+
+            shown_count += 1
             card_text = format_goals_card(league_info, home, away, match_time, analytics["odds_over"], analytics["p_over_25"], analytics["odds_btts_yes"], analytics["p_btts_yes"], analytics["odds_btts_1h"], analytics["p_btts_1h"], calculate_kelly_stake(analytics["p_over_25"], analytics["odds_over"]))
             btn = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"savepick_{fid}_GOALS_OVER_{analytics['odds_over']}_{calculate_kelly_stake(analytics['p_over_25'], analytics['odds_over'])}")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
+        
+        if shown_count == 0:
+            await query.message.reply_text("ℹ️️ No se encontraron partidos que cumplan con el filtro estricto de cuotas mínimas (+EV) para esta fecha.")
 
     elif data.startswith("loadfixtures_cat1x2_"):
         parts = data.split("_")
         selected_date = parts[2]
-        await query.message.edit_text(f"🔍 <b>Consultando partidos para 1X2 ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos 1X2 ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:7]:
+        shown_count = 0
+        for fix in fixtures:
+            if shown_count >= 5:
+                break
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             league = fix.get("league", {})
@@ -515,11 +555,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             m_1x2 = (await generate_fixture_analytics_real(fix))["market_1x2"]
             
+            # FILTRO DE VALOR: Solo mostrar si alguna cuota principal es >= 1.60
+            if m_1x2["odds_home"] < 1.60 and m_1x2["odds_away"] < 1.60:
+                continue
+
+            shown_count += 1
             card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
             btn = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"savepick_{fid}_1X2_HOME_{m_1x2['odds_home']}_{calculate_kelly_stake(m_1x2['p_home'], m_1x2['odds_home'])}")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
+        
+        if shown_count == 0:
+            await query.message.reply_text("ℹ️ No se encontraron partidos con cuotas de valor mínimo para este mercado en esta fecha.")
 
     elif data.startswith("loadfixtures_catcorners_"):
         parts = data.split("_")
@@ -530,7 +578,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:7]:
+        shown_count = 0
+        for fix in fixtures:
+            if shown_count >= 5:
+                break
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             league = fix.get("league", {})
@@ -541,18 +592,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             cc = (await generate_fixture_analytics_real(fix))["corners_cards"]
             
+            if cc["odds_corners_over"] < 1.65:
+                continue
+
+            shown_count += 1
             card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
             btn = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"savepick_{fid}_CORNERS_OVER_{cc['odds_corners_over']}_{calculate_kelly_stake(cc['p_corners'], cc['odds_corners_over'])}")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
+        
+        if shown_count == 0:
+            await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
 
 # ==========================================
 # ⚙️ WORKER INDEPENDIENTE DE AUTO-LIQUIDACIÓN
 # ==========================================
 
 async def auto_settlement_background_task():
-    """Bucle asíncrono en segundo plano para liquidar apuestas automáticamente."""
     while True:
         await asyncio.sleep(600)
         conn = get_db_connection()
