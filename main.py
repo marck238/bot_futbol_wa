@@ -206,7 +206,6 @@ def get_learning_calibration_factor():
         conn.close()
 
 async def fetch_fixtures_from_api(date_str):
-    async def fetch_fixtures_from_api(date_str):
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"date": date_str, "timezone": "America/Montevideo"}
