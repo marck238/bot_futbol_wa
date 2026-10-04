@@ -15,7 +15,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuración de Entorno (Render / Base de Datos)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8940818263:AAGv6e5_urn-umk1MjIQLpJ48M4cyiHEuI4")
+# Se deja vacío por defecto para forzar el uso correcto de las variables de entorno seguras
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -275,7 +276,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif "Ayuda" in text:
         await update.message.reply_text("ℹ️ <b>Ayuda de NosticProno</b>\n\nBot con auto-aprendizaje y calibración por Poisson.", parse_mode="HTML", reply_markup=get_persistent_keyboard())
     elif "Panel Admin" in text:
-        await update.message.reply_text("⚙️️ Panel de administración.", reply_markup=get_persistent_keyboard())
+        await update.message.reply_text("⚙ Panel de administración.", reply_markup=get_persistent_keyboard())
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -443,6 +444,10 @@ async def post_init(application: Application):
     asyncio.create_task(auto_settlement_background_task())
 
 def main():
+    if not TELEGRAM_TOKEN:
+        logger.error("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está configurada.")
+        return
+
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
