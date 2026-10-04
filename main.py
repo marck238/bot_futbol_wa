@@ -469,7 +469,11 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
 	
-elif "Combinadas EV+" in text:
+    # (aquí arriba estarán tus otros if / elif de los botones del menú...)
+    elif "📊 Mis Estadísticas" in text:
+        await handle_statistics(update, context)
+        
+    elif "🍀 Combinadas EV+" in text:
         await update.message.reply_text("🍀 Analizando el mercado y buscando las mejores opciones para tu combinada...", reply_markup=get_persistent_keyboard())
         
         try:
