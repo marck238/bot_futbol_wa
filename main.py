@@ -2,8 +2,8 @@
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import httpx
 
 # Configuración de Logging
@@ -16,6 +16,20 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8940818263:AAGv6e5_urn-umk1MjIQLpJ48M4cyiHEuI4")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
+
+# ==========================================
+# ⌨️ TECLADO INFERIOR (REPLY KEYBOARD)
+# ==========================================
+
+def get_persistent_keyboard():
+    """Genera el teclado persistente inferior del chat."""
+    keyboard = [
+        [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
+        [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🍀 Combinadas EV+")],
+        [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("🎯 Top Value +EV"), KeyboardButton("📖 Ayuda")],
+        [KeyboardButton("⚙️ Panel Admin")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ==========================================
 # 🎨 FUNCIONES DE FORMATO Y DISEÑO
@@ -104,45 +118,64 @@ def calculate_kelly_stake(probability, odds):
 # ==========================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start para inicializar el bot y mostrar el menú principal completo."""
+    """Comando /start que despliega el teclado inferior y va directo al selector de fechas."""
+    today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
+    tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
+    
     keyboard = [
-        [InlineKeyboardButton("⚽ Goles & BTTS", callback_data="menu_date_catgoals")],
-        [InlineKeyboardButton("📊 Ayuda & Info", callback_data="help")]
+        [InlineKeyboardButton("📅 Partidos de Hoy", callback_data=f"loadfixtures_catgoals_{today_str}")],
+        [InlineKeyboardButton("📅 Partidos de Mañana", callback_data=f"loadfixtures_catgoals_{tomorrow_str}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome_text = (
-        "🎉 <b>¡Bienvenido a NosticProno!</b>\n\n"
-        "Selecciona una categoría para analizar partidos con modelos estadísticos avanzados y Criterio de Kelly."
-    )
+    text = "🗓️ <b>Selecciona la fecha para analizar Goles & BTTS:</b>"
     
     if update.message:
-        await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
-    elif update.callback_query:
-        await update.callback_query.message.edit_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        # Aseguramos que se muestre el teclado inferior persistente
+        await update.message.reply_text("👇 Utiliza el menú inferior para cambiar de sección:", reply_markup=get_persistent_keyboard())
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja todas las interacciones de los botones interactivos."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja los clics en los botones del teclado inferior persistente."""
+    text = update.message.text
     
-    if data == "menu_date_catgoals":
+    if "Goles & BTTS" in text:
         today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
         tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
-        
         keyboard = [
             [InlineKeyboardButton("📅 Partidos de Hoy", callback_data=f"loadfixtures_catgoals_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana", callback_data=f"loadfixtures_catgoals_{tomorrow_str}")],
-            [InlineKeyboardButton("🔙 Volver al Menú", callback_data="main_menu")]
+            [InlineKeyboardButton("📅 Partidos de Mañana", callback_data=f"loadfixtures_catgoals_{tomorrow_str}")]
         ]
-        await query.message.edit_text(
+        await update.message.reply_text(
             "🗓️ <b>Selecciona la fecha para analizar Goles & BTTS:</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        
-    elif data.startswith("loadfixtures_catgoals_"):
+    elif "1X2 / Ganador" in text:
+        await update.message.reply_text("⚽ Módulo de Ganador (1X2) en preparación...", reply_markup=get_persistent_keyboard())
+    elif "Córners & Tarjetas" in text:
+        await update.message.reply_text("🚩 Módulo de Córners y Tarjetas activo.", reply_markup=get_persistent_keyboard())
+    elif "Combinadas EV+" in text:
+        await update.message.reply_text("🍀 Buscando combinadas de valor...", reply_markup=get_persistent_keyboard())
+    elif "Mis Estadísticas" in text:
+        await update.message.reply_text("📊 Tus estadísticas guardadas:", reply_markup=get_persistent_keyboard())
+    elif "Top Value +EV" in text:
+        await update.message.reply_text("🎯 Picks Top Value del día:", reply_markup=get_persistent_keyboard())
+    elif "Ayuda" in text:
+        await update.message.reply_text(
+            "ℹ️ <b>Ayuda de NosticProno</b>\n\nEste bot analiza mercados utilizando Poisson y el Criterio de Kelly.",
+            parse_mode="HTML",
+            reply_markup=get_persistent_keyboard()
+        )
+    elif "Panel Admin" in text:
+        await update.message.reply_text("⚙️ Panel de administración.", reply_markup=get_persistent_keyboard())
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Maneja las interacciones de los botones inline dentro de los mensajes."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
         
@@ -192,17 +225,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     elif data == "main_menu":
         await start_command(update, context)
-        
-    elif data == "help":
-        keyboard = [[InlineKeyboardButton("🔙 Volver", callback_data="main_menu")]]
-        await query.message.edit_text(
-            "ℹ️ <b>Ayuda de NosticProno</b>\n\nEste bot analiza mercados de fútbol utilizando Poisson y el Criterio de Kelly.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
 
 # ==========================================
-# ⚙️️ WORKER Y ARRANQUE SEGURO
+# ⚙️ WORKER Y ARRANQUE SEGURO
 # ==========================================
 
 async def auto_settlement_worker(context: ContextTypes.DEFAULT_TYPE):
@@ -210,7 +235,7 @@ async def auto_settlement_worker(context: ContextTypes.DEFAULT_TYPE):
     pass
 
 async def post_init(application: Application):
-    """Inicializa tareas usando el job_queue de PTB para evitar advertencias."""
+    """Inicializa tareas usando el job_queue de PTB."""
     application.job_queue.run_repeating(auto_settlement_worker, interval=300, first=10)
 
 def main():
@@ -221,10 +246,12 @@ def main():
         .build()
     )
 
+    # Registro de Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot de Telegram con API-Football...")
+    logger.info("Iniciando bot de Telegram con API-Football y teclado inferior...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
