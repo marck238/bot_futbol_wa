@@ -1,6 +1,7 @@
 ﻿import os
 import logging
 import asyncio
+import math
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -77,7 +78,6 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            # Asegura que la columna probability exista si la tabla ya fue creada previamente
             cur.execute("ALTER TABLE user_picks ADD COLUMN IF NOT EXISTS probability FLOAT;")
             conn.commit()
             logger.info("Base de datos inicializada correctamente.")
@@ -233,23 +233,96 @@ async def fetch_fixtures_from_api(date_str):
         logger.error(f"Error consultando API-Football: {e}")
     return []
 
-def generate_fixture_analytics(fix):
+def poisson_probability(lmbda, k):
+    """Calcula la probabilidad de Poisson para k goles dado un promedio esperado lmbda."""
+    return (math.pow(lmbda, k) * math.exp(-lmbda)) / math.factorial(k)
+
+def calculate_match_probabilities(lambda_home, lambda_away):
+    """Calcula la matriz de probabilidades 1X2, Over 2.5 y BTTS usando Poisson."""
+    p_home_win = 0.0
+    p_draw = 0.0
+    p_away_win = 0.0
+    p_over_25 = 0.0
+    p_btts = 0.0
+    
+    max_goals = 6
+    
+    for h in range(max_goals + 1):
+        p_h = poisson_probability(lambda_home, h)
+        for a in range(max_goals + 1):
+            p_a = poisson_probability(lambda_away, a)
+            joint_prob = p_h * p_a
+            
+            if h > a:
+                p_home_win += joint_prob
+            elif h == a:
+                p_draw += joint_prob
+            else:
+                p_away_win += joint_prob
+                
+            if (h + a) > 2.5:
+                p_over_25 += joint_prob
+                
+            if h > 0 and a > 0:
+                p_btts += joint_prob
+                
+    return {
+        "p_home": round(p_home_win, 3),
+        "p_draw": round(p_draw, 3),
+        "p_away": round(p_away_win, 3),
+        "p_over_25": round(p_over_25, 3),
+        "p_btts": round(p_btts, 3)
+    }
+
+async def fetch_team_statistics(team_id, league_id, season="2026"):
+    """Consulta las estadísticas reales de la temporada de un equipo en API-Football."""
+    url = f"https://{API_FOOTBALL_HOST}/teams/statistics"
+    headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
+    params = {"team": team_id, "league": league_id, "season": season}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json().get("response", {})
+                return data
+    except Exception as e:
+        logger.error(f"Error obteniendo estadísticas para el equipo {team_id}: {e}")
+    return {}
+
+async def generate_fixture_analytics_real(fix):
     calibration = get_learning_calibration_factor()
     
     teams = fix.get("teams", {})
-    home_id = teams.get("home", {}).get("id", 0)
-    away_id = teams.get("away", {}).get("id", 0)
+    league = fix.get("league", {})
     
-    # Estimación de goles esperados (Lambda) basada en los IDs del equipo para dar variedad real,
-    # simulando el promedio ofensivo/defensivo típico de ligas competitivas.
-    import random
-    rng = random.Random(home_id + away_id)
+    home_team = teams.get("home", {})
+    away_team = teams.get("away", {})
     
-    # Lambda típico en fútbol suele rondar 1.1 a 1.6 goles por partido
-    lambda_home = round(rng.uniform(1.15, 1.75), 2)
-    lambda_away = round(rng.uniform(0.90, 1.45), 2)
+    home_id = home_team.get("id", 0)
+    away_id = away_team.get("id", 0)
+    league_id = league.get("id", 0)
+    season = str(league.get("season", "2026"))
     
-    # Calcular probabilidades matemáticas puras con Poisson
+    home_stats = await fetch_team_statistics(home_id, league_id, season)
+    away_stats = await fetch_team_statistics(away_id, league_id, season)
+    
+    try:
+        lambda_home_scored = float(home_stats.get("goals", {}).get("for", {}).get("average", {}).get("home", 1.45))
+        lambda_home_conceded = float(home_stats.get("goals", {}).get("against", {}).get("average", {}).get("home", 1.05))
+        
+        lambda_away_scored = float(away_stats.get("goals", {}).get("for", {}).get("average", {}).get("away", 1.15))
+        lambda_away_conceded = float(away_stats.get("goals", {}).get("against", {}).get("average", {}).get("away", 1.35))
+        
+        lambda_home = round((lambda_home_scored + lambda_away_conceded) / 2.0, 2)
+        lambda_away = round((lambda_away_scored + lambda_home_conceded) / 2.0, 2)
+    except Exception:
+        lambda_home = 1.45
+        lambda_away = 1.15
+
+    lambda_home = max(0.5, lambda_home)
+    lambda_away = max(0.5, lambda_away)
+
     poisson_res = calculate_match_probabilities(lambda_home, lambda_away)
     
     p_home = poisson_res["p_home"]
@@ -259,7 +332,6 @@ def generate_fixture_analytics(fix):
     p_btts = min(0.95, poisson_res["p_btts"] * calibration)
     p_btts_1h = min(0.95, 0.350 * calibration)
 
-    # Cuotas justas de mercado con un margen de casa del 5% (Vigourish)
     margin = 1.05
     odds_home = round(margin / max(0.05, p_home), 2)
     odds_draw = round(margin / max(0.05, p_draw), 2)
@@ -406,7 +478,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
-        for fix in fixtures[:7]: # Mostramos hasta 7 partidos organizados
+        for fix in fixtures[:7]:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             league = fix.get("league", {})
@@ -415,7 +487,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             away = teams.get("away", {}).get("name", "Visitante")
             
             match_time = format_match_time(fix)
-            analytics = generate_fixture_analytics(fix)["goals"]
+            analytics = (await generate_fixture_analytics_real(fix))["goals"]
             
             card_text = format_goals_card(league_info, home, away, match_time, analytics["odds_over"], analytics["p_over_25"], analytics["odds_btts_yes"], analytics["p_btts_yes"], analytics["odds_btts_1h"], analytics["p_btts_1h"], calculate_kelly_stake(analytics["p_over_25"], analytics["odds_over"]))
             btn = InlineKeyboardMarkup([
@@ -441,7 +513,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             away = teams.get("away", {}).get("name", "Visitante")
             
             match_time = format_match_time(fix)
-            m_1x2 = generate_fixture_analytics(fix)["market_1x2"]
+            m_1x2 = (await generate_fixture_analytics_real(fix))["market_1x2"]
             
             card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
             btn = InlineKeyboardMarkup([
@@ -467,7 +539,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             away = teams.get("away", {}).get("name", "Visitante")
             
             match_time = format_match_time(fix)
-            cc = generate_fixture_analytics(fix)["corners_cards"]
+            cc = (await generate_fixture_analytics_real(fix))["corners_cards"]
             
             card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
             btn = InlineKeyboardMarkup([
@@ -482,7 +554,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auto_settlement_background_task():
     """Bucle asíncrono en segundo plano para liquidar apuestas automáticamente."""
     while True:
-        await asyncio.sleep(600)  # Se ejecuta cada 10 minutos
+        await asyncio.sleep(600)
         conn = get_db_connection()
         if not conn:
             continue
@@ -539,7 +611,6 @@ def main():
         logger.error("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está configurada.")
         return
 
-    # Iniciar el servidor HTTP de salud en un hilo separado para Render
     threading.Thread(target=run_health_server, daemon=True).start()
 
     application = (
