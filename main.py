@@ -473,14 +473,19 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif "📊 Mis Estadísticas" in text:
         await handle_statistics(update, context)
         
-    elif "🍀 Combinadas EV+" in text:
+    elif "Combinadas EV+" in text:
         await update.message.reply_text("🍀 Analizando el mercado y buscando las mejores opciones para tu combinada...", reply_markup=get_persistent_keyboard())
         
         try:
-            fixtures_data = await fetch_fixtures_for_date("2026-10-04")
+            from datetime import datetime
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            
+            # Usamos la función que ya tiene tu bot para buscar partidos (ej: fetch_fixtures_for_today o fetch_fixtures_for_date)
+            # Si tu función se llama diferente, ajusta el nombre aquí abajo:
+            fixtures_data = await fetch_fixtures_for_today(today_str)
             
             candidates = []
-            for fix in fixtures_data[:10]:
+            for fix in fixtures_data[:15]:
                 analysis = await generate_fixture_analytics_real(fix)
                 h_name = fix.get("teams", {}).get("home", {}).get("name", "Local")
                 a_name = fix.get("teams", {}).get("away", {}).get("name", "Visita")
@@ -488,7 +493,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 
                 p_over = analysis["goals"]["p_over_25"]
                 odds_over = analysis["goals"]["odds_over"]
-                if p_over >= 0.60:
+                if p_over >= 0.58:
                     candidates.append({
                         "match": f"{h_name} vs {a_name}",
                         "league": league_name,
