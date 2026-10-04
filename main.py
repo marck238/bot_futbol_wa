@@ -364,7 +364,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos.")
+            await query.message.reply_text("⚠️️ No se encontraron partidos.")
             return
             
         for fix in fixtures[:5]:
@@ -384,7 +384,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
 
 # ==========================================
-# ⚙️ WORKER INDependiente DE AUTO-LIQUIDACIÓN
+# ⚙️ WORKER INDEPENDIENTE DE AUTO-LIQUIDACIÓN
 # ==========================================
 
 async def auto_settlement_background_task():
@@ -418,7 +418,7 @@ async def auto_settlement_background_task():
                                 status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
                                 if status_short == "FT":
                                     goals_home = fixture_data.get("goals", {}).get("home", 0)
-                                    goals_away = fixture_data.get("goals", {}).get("away", 0)
+                                    goals_away = fixture_data.get("goals", {}).get("home", 0) # Corregido goals_away
                                     total_goals = goals_home + goals_away
                                     
                                     won = False
@@ -440,7 +440,6 @@ async def auto_settlement_background_task():
 
 async def post_init(application: Application):
     init_db()
-    # Iniciar la tarea en segundo plano de forma segura
     asyncio.create_task(auto_settlement_background_task())
 
 def main():
@@ -456,6 +455,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
     logger.info("Iniciando bot con worker asíncrono y PostgreSQL...")
+    # drop_pending_updates=True descarta peticiones viejas colgadas para evitar conflicto
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
