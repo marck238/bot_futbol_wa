@@ -542,6 +542,13 @@ async def check_access(update: Update) -> bool:
 
     db_user = get_user_by_telegram_id(user_id)
     if db_user and db_user.get("is_active") == 1:
+        # Actualizar username y first_name automáticamente si interactuó
+        conn, db_type = get_db_connection()
+        cursor = conn.cursor()
+        ph = "%s" if db_type == "postgres" else "?"
+        cursor.execute(f"UPDATE users SET username = {ph}, first_name = {ph} WHERE telegram_id = {ph}", (username, first_name, user_id))
+        conn.commit()
+        conn.close()
         return True
 
     if db_user and db_user.get("is_active") == 0:
@@ -1477,7 +1484,7 @@ async def top_value_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await loading_msg.delete()
 
     if not fixtures:
-        await update.message.reply_text("ℹ️ *No se encontraron partidos válidos o con margen de ganancia (+EV) para hoy.*", parse_mode="Markdown")
+        await update.message.reply_text("ℹ️️ *No se encontraron partidos válidos o con margen de ganancia (+EV) para hoy.*", parse_mode="Markdown")
         return
 
     now_ts = int(time.time())
