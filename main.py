@@ -51,7 +51,7 @@ def init_db():
                     odds FLOAT,
                     probability FLOAT,
                     stake FLOAT,
-                    status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, WON, LOST
+                    status VARCHAR(20) DEFAULT 'PENDING',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -67,7 +67,6 @@ def init_db():
 # ==========================================
 
 def get_persistent_keyboard():
-    """Genera el teclado persistente inferior del chat."""
     keyboard = [
         [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
         [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🍀 Combinadas EV+")],
@@ -137,31 +136,23 @@ def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_
 # ==========================================
 
 def get_learning_calibration_factor():
-    """
-    Calcula un factor de corrección real basado en el historial de aciertos de la base de datos.
-    Compara la probabilidad predicha frente a los resultados reales liquidados.
-    """
     conn = get_db_connection()
     if not conn:
-        return 1.0  # Sin BD, sin ajuste
+        return 1.0
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT probability, status FROM user_picks WHERE status IN ('WON', 'LOST');")
             rows = cur.fetchall()
             if len(rows) < 10:
-                return 1.0  # Muestra muy pequeña para calibrar
-            
+                return 1.0
             total_pred = sum(r['probability'] for r in rows)
             total_won = sum(1 for r in rows if r['status'] == 'WON')
             actual_hit_rate = total_won / len(rows)
             avg_predicted = total_pred / len(rows)
-            
             if avg_predicted <= 0:
                 return 1.0
-            
-            # Factor de calibración dinámico
             factor = actual_hit_rate / avg_predicted
-            return max(0.8, min(1.2, factor))  # Limitar corrección entre 80% y 120%
+            return max(0.8, min(1.2, factor))
     except Exception as e:
         logger.error(f"Error calculando calibración: {e}")
         return 1.0
@@ -183,20 +174,14 @@ async def fetch_fixtures_from_api(date_str):
 
 def generate_fixture_analytics(fix):
     calibration = get_learning_calibration_factor()
-    
-    # Aplicar factor corrector de aprendizaje a las probabilidades base
     p_over = min(0.95, 0.650 * calibration)
     p_btts = min(0.95, 0.620 * calibration)
     p_btts_1h = min(0.95, 0.350 * calibration)
     
     return {
         "goals": {
-            "p_over_25": p_over,
-            "p_btts_yes": p_btts,
-            "p_btts_1h": p_btts_1h,
-            "odds_over": 1.72,
-            "odds_btts_yes": 1.80,
-            "odds_btts_1h": 2.50
+            "p_over_25": p_over, "p_btts_yes": p_btts, "p_btts_1h": p_btts_1h,
+            "odds_over": 1.72, "odds_btts_yes": 1.80, "odds_btts_1h": 2.50
         },
         "market_1x2": {
             "p_home": 0.520, "odds_home": 1.95,
@@ -264,7 +249,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ]
         await update.message.reply_text("🗓️ <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif "Mis Estadísticas" in text:
-        # Mostrar resumen de aprendizaje y rendimiento acumulado
         conn = get_db_connection()
         if conn:
             with conn.cursor() as cur:
@@ -283,7 +267,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 conn.close()
         else:
-            await update.message.reply_text("📊 Base de datos no conectada para estadísticas.", reply_markup=get_persistent_keyboard())
+            await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
     elif "Combinadas EV+" in text:
         await update.message.reply_text("🍀 Buscando combinadas de valor...", reply_markup=get_persistent_keyboard())
     elif "Top Value +EV" in text:
@@ -299,7 +283,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data.startswith("savepick_"):
-        # Guardar pick en base de datos para seguimiento y aprendizaje posterior
         parts = data.split("_")
         fid = int(parts[1])
         market = parts[2]
@@ -325,7 +308,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ Base de datos no disponible.", show_alert=True)
         return
 
-    # --- CARGA DE PARTIDOS (GOLES, 1X2, CORNERS) ---
     if data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
@@ -402,67 +384,64 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
 
 # ==========================================
-# ⚙️ WORKER DE APRENDIZAJE Y AUTO-LIQUIDACIÓN
+# ⚙️ WORKER INDependiente DE AUTO-LIQUIDACIÓN
 # ==========================================
 
-async def auto_settlement_worker(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Worker en segundo plano que revisa partidos pendientes guardados, 
-    consulta sus resultados reales y los liquida para alimentar el aprendizaje.
-    """
-    conn = get_db_connection()
-    if not conn:
-        return
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
-            pending_picks = cur.fetchall()
-            
-            if not pending_picks:
-                return
-            
-            headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                for pick in pending_picks:
-                    pick_id = pick['id']
-                    fid = pick['fixture_id']
-                    market = pick['market_type']
-                    
-                    url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
-                    resp = await client.get(url, headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json().get("response", [])
-                        if data:
-                            fixture_data = data[0]
-                            status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
-                            
-                            # Si el partido ya finalizó (FT)
-                            if status_short == "FT":
-                                goals_home = fixture_data.get("goals", {}).get("home", 0)
-                                goals_away = fixture_data.get("goals", {}).get("away", 0)
-                                total_goals = goals_home + goals_away
-                                
-                                won = False
-                                if "GOALS_OVER" in market and total_goals > 2.5:
-                                    won = True
-                                elif "1X2_HOME" in market and goals_home > goals_away:
-                                    won = True
-                                elif "CORNERS_OVER" in market:
-                                    won = True  # Simulación de cumplimiento de córner
+async def auto_settlement_background_task():
+    """Bucle asíncrono en segundo plano para liquidar apuestas automáticamente."""
+    while True:
+        await asyncio.sleep(600)  # Se ejecuta cada 10 minutos
+        conn = get_db_connection()
+        if not conn:
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
+                pending_picks = cur.fetchall()
+                if not pending_picks:
+                    conn.close()
+                    continue
+                
+                headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    for pick in pending_picks:
+                        pick_id = pick['id']
+                        fid = pick['fixture_id']
+                        market = pick['market_type']
+                        
+                        url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
+                        resp = await client.get(url, headers=headers)
+                        if resp.status_code == 200:
+                            data = resp.json().get("response", [])
+                            if data:
+                                fixture_data = data[0]
+                                status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
+                                if status_short == "FT":
+                                    goals_home = fixture_data.get("goals", {}).get("home", 0)
+                                    goals_away = fixture_data.get("goals", {}).get("away", 0)
+                                    total_goals = goals_home + goals_away
                                     
-                                new_status = 'WON' if won else 'LOST'
-                                cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
-                                conn.commit()
-                                logger.info(f"Pick ID {pick_id} liquidado automáticamente como: {new_status}")
-    except Exception as e:
-        logger.error(f"Error en auto_settlement_worker: {e}")
-    finally:
-        conn.close()
+                                    won = False
+                                    if "GOALS_OVER" in market and total_goals > 2.5:
+                                        won = True
+                                    elif "1X2_HOME" in market and goals_home > goals_away:
+                                        won = True
+                                    elif "CORNERS_OVER" in market:
+                                        won = True
+                                        
+                                    new_status = 'WON' if won else 'LOST'
+                                    cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
+                                    conn.commit()
+                                    logger.info(f"Pick ID {pick_id} liquidado automáticamente como: {new_status}")
+        except Exception as e:
+            logger.error(f"Error en bucle de auto-liquidación: {e}")
+        finally:
+            conn.close()
 
 async def post_init(application: Application):
     init_db()
-    application.job_queue.run_repeating(auto_settlement_worker, interval=600, first=15)
+    # Iniciar la tarea en segundo plano de forma segura
+    asyncio.create_task(auto_settlement_background_task())
 
 def main():
     application = (
@@ -476,7 +455,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con motor de auto-aprendizaje y PostgreSQL...")
+    logger.info("Iniciando bot con worker asíncrono y PostgreSQL...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
