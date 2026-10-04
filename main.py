@@ -113,7 +113,35 @@ def format_match_time(fix):
     except Exception:
         return "00:00"
 
+def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_draw, odds_draw, p_away, odds_away, stake_pick):
+    if p_home >= 0.50 and odds_home >= 1.70:
+        recommendation = f"✅ **Apostar por la Victoria Local ({home})**\n💡 <i>La probabilidad matemática supera el 50% con cuota de valor.</i>"
+    elif p_away >= 0.40 and odds_away >= 2.00:
+        recommendation = f"✅ **Apostar por la Victoria Visitante ({away})**\n💡 <i>Cuota atractiva para arriesgar al visitante.</i>"
+    else:
+        recommendation = "⚠️ **Partido Emparejado / Sin Valor Claro**\n💡 <i>Se recomiendan mercados alternativos o evitar este encuentro.</i>"
+
+    return (
+        f"🏆 <b>{home} vs {away}</b>\n"
+        f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>MERCADO 1X2 / GANADOR</b>\n\n"
+        f"• 🏠 <b>Victoria Local:</b> {odds_home:.2f}  <code>({p_home*100:.1f}%)</code>\n"
+        f"• 🤝 <b>Empate:</b> {odds_draw:.2f}  <code>({p_draw*100:.1f}%)</code>\n"
+        f"• ✈️️ <b>Victoria Visitante:</b> {odds_away:.2f}  <code>({p_away*100:.1f}%)</code>\n\n"
+        f"🎯 <b>Acción Sugerida:</b>\n{recommendation}\n\n"
+        f"💰 <b>Stake Kelly:</b> <code>{stake_pick}% de tu bankroll</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━"
+    )
+
 def format_goals_card(league_info, home, away, match_time, odds_over, p_over, odds_btts, p_btts, odds_btts_1h, p_btts_1h, stake_over):
+    if p_over >= 0.60:
+        recommendation = "✅ **Entrar a Más de 2.5 Goles**\n💡 <i>Alta tendencia estadística de partidos abiertos.</i>"
+    elif p_btts >= 0.60:
+        recommendation = "✅ **Entrar a Ambos Anotan (BTTS)**\n💡 <i>Ambos equipos muestran capacidad ofensiva constante.</i>"
+    else:
+        recommendation = "⚠️ **Mercado de Goles Reservado**\n💡 <i>Partido cerrado o de bajo margen previsible.</i>"
+
     return (
         f"⚽ <b>{home} vs {away}</b>\n"
         f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
@@ -122,24 +150,17 @@ def format_goals_card(league_info, home, away, match_time, odds_over, p_over, od
         f"• <b>Más de 2.5 Goles:</b> {odds_over:.2f}  <code>(Prob: {p_over*100:.1f}%)</code>\n"
         f"• <b>Ambos Anotan (BTTS):</b> {odds_btts:.2f}  <code>(Prob: {p_btts*100:.1f}%)</code>\n"
         f"• 🔥 <b>BTTS 1ª Mitad:</b> {odds_btts_1h:.2f}  <code>(Prob: {p_btts_1h*100:.1f}%)</code>\n\n"
-        f"🎯 <b>Stake Kelly (Over 2.5):</b> <code>{stake_over}%</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━"
-    )
-
-def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_draw, odds_draw, p_away, odds_away, stake_pick):
-    return (
-        f"🏆 <b>{home} vs {away}</b>\n"
-        f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>MERCADO 1X2 / GANADOR</b>\n\n"
-        f"• 🏠 <b>Victoria Local:</b> {odds_home:.2f}  <code>({p_home*100:.1f}%)</code>\n"
-        f"• 🤝 <b>Empate:</b> {odds_draw:.2f}  <code>({p_draw*100:.1f}%)</code>\n"
-        f"• ✈️ <b>Victoria Visitante:</b> {odds_away:.2f}  <code>({p_away*100:.1f}%)</code>\n\n"
-        f"🎯 <b>Stake Kelly (Recomendado):</b> <code>{stake_pick}%</code>\n"
+        f"🎯 <b>Acción Sugerida:</b>\n{recommendation}\n\n"
+        f"💰 <b>Stake Kelly (Over 2.5):</b> <code>{stake_over}% de tu bankroll</code>\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
 def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_corners_over, p_corners, avg_cards, odds_cards_over, p_cards, stake_corners):
+    if p_corners >= 0.65:
+        recommendation = "✅ **Entrar a Más de 8.5 Córners**\n💡 <i>Estilos de juego con alta generación de saques de esquina.</i>"
+    else:
+        recommendation = "⚠️ **Baja intensidad estimada en córners**\n💡 <i>Es preferible buscar líneas más bajas o evitar.</i>"
+
     return (
         f"🚩 <b>{home} vs {away}</b>\n"
         f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
@@ -149,7 +170,8 @@ def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_
         f"  └ <i>Más de 8.5 Córners:</i> {odds_corners_over:.2f} <code>({p_corners*100:.1f}%)</code>\n\n"
         f"• 🟨 <b>Tarjetas Promedio:</b> <code>{avg_cards}</code>\n"
         f"  └ <i>Más de 4.5 Tarjetas:</i> {odds_cards_over:.2f} <code>({p_cards*100:.1f}%)</code>\n\n"
-        f"🎯 <b>Stake Kelly (Córners):</b> <code>{stake_corners}%</code>\n"
+        f"🎯 <b>Acción Sugerida:</b>\n{recommendation}\n\n"
+        f"💰 <b>Stake Kelly (Córners):</b> <code>{stake_corners}% de tu bankroll</code>\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -269,7 +291,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("📅 Partidos de Hoy (Córners)", callback_data=f"loadfixtures_catcorners_{today_str}")],
             [InlineKeyboardButton("📅 Partidos de Mañana (Córners)", callback_data=f"loadfixtures_catcorners_{tomorrow_str}")]
         ]
-        await update.message.reply_text("🗓️️ <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("🗓 <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     elif "Mis Estadísticas" in text:
         conn = get_db_connection()
         if conn:
@@ -327,7 +349,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 conn.close()
         else:
-            await query.answer("⚠️️ Base de datos no disponible.", show_alert=True)
+            await query.answer("⚠ Base de datos no disponible.", show_alert=True)
         return
 
     if data.startswith("loadfixtures_catgoals_"):
