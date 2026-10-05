@@ -685,54 +685,56 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 
 async def auto_settlement_background_task():
-    while True:
-        await asyncio.sleep(600)
-        conn = get_db_connection()
-        if not conn:
-            continue
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
-                pending_picks = cur.fetchall()
-                if not pending_picks:
-                    conn.close()
-                    continue
-                
-                headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    for pick in pending_picks:
-                        pick_id = pick['id']
-                        fid = pick['fixture_id']
-                        market = pick['market_type']
-                        
-                        url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
-                        resp = await client.get(url, headers=headers)
-                        if resp.status_code == 200:
-                            data = resp.json().get("response", [])
-                            if data:
-                                fixture_data = data[0]
-                                status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
-                                if status_short == "FT":
-                                    goals_home = fixture_data.get("goals", {}).get("home", 0)
-                                    goals_away = fixture_data.get("goals", {}).get("away", 0)
-                                    total_goals = goals_home + goals_away
-                                    
-                                    won = False
-                                    if "GOALS_OVER" in market and total_goals > 2.5:
-                                        won = True
-                                    elif "1X2_HOME" in market and goals_home > goals_away:
-                                        won = True
-                                    elif "CORNERS_OVER" in market:
-                                        won = True
-                                    
-                                    new_status = 'WON' if won else 'LOST'
-                                    cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
-                                    conn.commit()
-                                    logger.info(f"Pick ID {pick_id} liquidado automáticamente como: {new_status}")
-        except Exception as e:
-            logger.error(f"Error en bucle de auto-liquidación: {e}")
-        finally:
-            conn.close()
+    try:
+        while True:
+            await asyncio.sleep(600)
+            conn = get_db_connection()
+            if not conn:
+                continue
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
+                    pending_picks = cur.fetchall()
+                    if not pending_picks:
+                        continue
+                    
+                    headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        for pick in pending_picks:
+                            pick_id = pick['id']
+                            fid = pick['fixture_id']
+                            market = pick['market_type']
+                            
+                            url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
+                            resp = await client.get(url, headers=headers)
+                            if resp.status_code == 200:
+                                data = resp.json().get("response", [])
+                                if data:
+                                    fixture_data = data[0]
+                                    status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
+                                    if status_short == "FT":
+                                        goals_home = fixture_data.get("goals", {}).get("home", 0)
+                                        goals_away = fixture_data.get("goals", {}).get("away", 0)
+                                        total_goals = goals_home + goals_away
+                                        
+                                        won = False
+                                        if "GOALS_OVER" in market and total_goals > 2.5:
+                                            won = True
+                                        elif "1X2_HOME" in market and goals_home > goals_away:
+                                            won = True
+                                        elif "CORNERS_OVER" in market:
+                                            won = True
+                                        
+                                        new_status = 'WON' if won else 'LOST'
+                                        cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
+                                        conn.commit()
+                                        logger.info(f"Pick ID {pick_id} liquidado automáticamente como: {new_status}")
+            except Exception as e:
+                logger.error(f"Error en bucle de auto-liquidación: {e}")
+            finally:
+                conn.close()
+    except asyncio.CancelledError:
+        logger.info("Tarea de auto-liquidación detenida limpiamente.")
 
 async def post_init(application: Application):
     init_db()
