@@ -161,7 +161,7 @@ def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_
     if p_corners >= 0.50 and ev_corners > 0:
         recommendation = "🟢 **Entrar a Más de 8.5 Córners**\n💡 <i>Estilos de juego con alta generación y valor positivo (+EV).</i>"
     else:
-        recommendation = "⚠️️ **Baja intensidad estimada en córners**\n💡 <i>Es preferible buscar líneas más bajas o evitar.</i>"
+        recommendation = "⚠ **Baja intensidad estimada en córners**\n💡 <i>Es preferible buscar líneas más bajas o evitar.</i>"
 
     return (
         f"🚩 <b>{home} vs {away}</b>\n"
@@ -559,6 +559,34 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error(f"Error generando combinada: {e}")
             await update.message.reply_text("❌ Ocurrió un error al armar la combinada.", reply_markup=get_persistent_keyboard())
 
+    elif "Panel Admin" in text:
+        conn = get_db_connection()
+        total_picks = 0
+        pending_picks = 0
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) as pending FROM user_picks;")
+                    res = cur.fetchone()
+                    total_picks = res['total'] or 0
+                    pending_picks = res['pending'] or 0
+            except Exception as e:
+                logger.error(f"Error consultando panel admin: {e}")
+            finally:
+                conn.close()
+
+        admin_text = (
+            "⚙️ <b>PANEL DE ADMINISTRACIÓN</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            f"• 🗄️ <b>Total Picks en DB:</b> <code>{total_picks}</code>\n"
+            f"• ⏳ <b>Picks Pendientes (Auto-tracking):</b> <code>{pending_picks}</code>\n"
+            f"• 🤖 <b>Estado del Bot:</b> <code>ONLINE (Activo)</code>\n"
+            f"• 🌐 <b>API-Football:</b> <code>Conectado</code>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>El worker automático verifica resultados cada 10 minutos.</i>"
+        )
+        await update.message.reply_text(admin_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
+
     elif "Ayuda" in text:
         help_text = (
             "📖 <b>GUÍA DE USO - BOT DE PRONÓSTICOS</b>\n\n"
@@ -577,10 +605,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
-    
-    # Responder inmediatamente al botón de Telegram para quitar el estado de carga
     await query.answer()
+    data = query.data
     
     if data.startswith("save_"):
         try:
@@ -588,7 +614,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fid = int(parts[1])
             market_type_short = parts[2]
             
-            # Mapeo a nombre legible para la base de datos
             market_mapping = {
                 "GOALS": "GOALS_OVER_2.5",
                 "1X2": "1X2_HOME",
@@ -696,7 +721,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
             return
             
         shown_count = 0
@@ -724,43 +749,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
         
         if shown_count == 0:
-            await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
-
-    elif data.startswith("loadfixtures_catcorners_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            cc = (await generate_fixture_analytics_real(fix))["corners_cards"]
-            
-            if cc["odds_corners_over"] < 1.65:
-                continue
-
-            shown_count += 1
-            card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"save_{fid}_CORNERS_{cc['odds_corners_over']}_{calculate_kelly_stake(cc['p_corners'], cc['odds_corners_over'])}")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-        
-        if shown_count == 0:
-            await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
+            await query.message.reply_text("ℹ️️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
 
 # ==========================================
 # ⚙️ WORKER INDEPENDIENTE DE AUTO-LIQUIDACIÓN
