@@ -30,10 +30,9 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("🍀 Analizando el mercado y buscando las mejores opciones para tu combinada...", reply_markup=get_persistent_keyboard())
         
         try:
-            # Importación local y segura con nombre único para la fecha
-            current_date_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
+            import datetime as dt
+            current_date_str = dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).strftime("%Y-%m-%d")
             
-            # Asegúrate de que esta función coincida con la que tienes en tu proyecto para buscar partidos de hoy
             fixtures_data = await fetch_fixtures_for_today(current_date_str)
             
             candidates = []
