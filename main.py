@@ -1,6 +1,6 @@
 ﻿import os
 import logging
-from datetime import datetime, timezone, timedelta
+import datetime as dt
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -30,7 +30,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("🍀 Analizando el mercado y buscando las mejores opciones para tu combinada...", reply_markup=get_persistent_keyboard())
         
         try:
-            import datetime as dt
             current_date_str = dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).strftime("%Y-%m-%d")
             
             fixtures_data = await fetch_fixtures_for_today(current_date_str)
