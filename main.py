@@ -469,18 +469,19 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
 	
     # (aquí arriba estarán tus otros if / elif de los botones del menú...)
-    elif "📊 Mis Estadísticas" in text:
+    text = update.message.text.strip() if update.message and update.message.text else ""
+    print(f"DEBUG - Mensaje recibido de Telegram: '{text}'")
+
+    if "Estadísticas" in text:
         await handle_statistics(update, context)
         
-    elif "Combinadas EV+" in text:
+    elif "Combinada" in text or "EV+" in text:
         await update.message.reply_text("🍀 Analizando el mercado y buscando las mejores opciones para tu combinada...", reply_markup=get_persistent_keyboard())
         
         try:
             from datetime import datetime
             today_str = datetime.now().strftime("%Y-%m-%d")
             
-            # Usamos la función que ya tiene tu bot para buscar partidos (ej: fetch_fixtures_for_today o fetch_fixtures_for_date)
-            # Si tu función se llama diferente, ajusta el nombre aquí abajo:
             fixtures_data = await fetch_fixtures_for_today(today_str)
             
             candidates = []
