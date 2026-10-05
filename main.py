@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 import asyncio
 import math
@@ -115,10 +115,11 @@ def format_match_time(fix):
         return "00:00"
 
 def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_draw, odds_draw, p_away, odds_away, stake_pick):
-    if p_home >= 0.50 and odds_home >= 1.70:
-        recommendation = f"✅ **Apostar por la Victoria Local ({home})**\n💡 <i>La probabilidad matemática supera el 50% con cuota de valor.</i>"
-    elif p_away >= 0.40 and odds_away >= 2.00:
-        recommendation = f"✅ **Apostar por la Victoria Visitante ({away})**\n💡 <i>Cuota atractiva para arriesgar al visitante.</i>"
+    ev_home = (p_home * odds_home) - 1
+    if p_home >= 0.45 and ev_home > 0:
+        recommendation = f"🟢 **Apostar por la Victoria Local ({home})**\n💡 <i>Probabilidad sólida con valor esperado positivo (+EV).</i>"
+    elif p_home >= 0.38:
+        recommendation = f"🟡 **Oportunidad Moderada en Local ({home})**\n💡 <i>Cuota atractiva, evaluar stake prudente.</i>"
     else:
         recommendation = "⚠️ **Partido Emparejado / Sin Valor Claro**\n💡 <i>Se recomiendan mercados alternativos o evitar este encuentro.</i>"
 
@@ -136,12 +137,13 @@ def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_dr
     )
 
 def format_goals_card(league_info, home, away, match_time, odds_over, p_over, odds_btts, p_btts, odds_btts_1h, p_btts_1h, stake_over):
-    if p_over >= 0.60:
-        recommendation = "✅ **Entrar a Más de 2.5 Goles**\n💡 <i>Alta tendencia estadística de partidos abiertos.</i>"
-    elif p_btts >= 0.60:
-        recommendation = "✅ **Entrar a Ambos Anotan (BTTS)**\n💡 <i>Ambos equipos muestran capacidad ofensiva constante.</i>"
+    ev_over = (p_over * odds_over) - 1
+    if p_over >= 0.50 and ev_over > 0:
+        recommendation = "🟢 **Entrar a Más de 2.5 Goles**\n💡 <i> Alta probabilidad matemática y valor positivo detectado (+EV).</i>"
+    elif p_over >= 0.42:
+        recommendation = "🟡 **Mercado de Goles Moderado**\n💡 <i>Cuota atractiva, margen ajustado pero viable.</i>"
     else:
-        recommendation = "⚠️ **Mercado de Goles Reservado**\n💡 <i>Partido cerrado o de bajo margen previsible.</i>"
+        recommendation = "⚠️ **Mercado de Goles Reservado**\n💡 <i>Partido cerrado o de bajo margen previsible según Poisson.</i>"
 
     return (
         f"⚽ <b>{home} vs {away}</b>\n"
@@ -157,8 +159,9 @@ def format_goals_card(league_info, home, away, match_time, odds_over, p_over, od
     )
 
 def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_corners_over, p_corners, avg_cards, odds_cards_over, p_cards, stake_corners):
-    if p_corners >= 0.65:
-        recommendation = "✅ **Entrar a Más de 8.5 Córners**\n💡 <i>Estilos de juego con alta generación de saques de esquina.</i>"
+    ev_corners = (p_corners * odds_corners_over) - 1
+    if p_corners >= 0.50 and ev_corners > 0:
+        recommendation = "🟢 **Entrar a Más de 8.5 Córners**\n💡 <i>Estilos de juego con alta generación y valor positivo (+EV).</i>"
     else:
         recommendation = "⚠️ **Baja intensidad estimada en córners**\n💡 <i>Es preferible buscar líneas más bajas o evitar.</i>"
 
@@ -534,13 +537,13 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
 
     elif "Combinada" in text or "EV+" in text:
-        # ... (Mantener el código existente de combinadas)
         pass
     else:
         await update.message.reply_text(
             "Utiliza los botones del menú inferior para interactuar con el bot.",
             reply_markup=get_persistent_keyboard()
         )
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
