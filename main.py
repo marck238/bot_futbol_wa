@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 import asyncio
 import math
@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuración de Entorno (Render / Base de Datos)
+# Configuración de Entorno
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
@@ -47,7 +47,6 @@ def run_health_server():
 # ==========================================
 
 def get_db_connection():
-    """Crea una conexión a la base de datos PostgreSQL."""
     if not DATABASE_URL:
         return None
     try:
@@ -58,10 +57,9 @@ def get_db_connection():
         return None
 
 def init_db():
-    """Inicializa la tabla de picks para el sistema de aprendizaje y estadísticas."""
     conn = get_db_connection()
     if not conn:
-        logger.warning("DATABASE_URL no configurada. El almacenamiento y aprendizaje persistente estarán desactivados.")
+        logger.warning("DATABASE_URL no configurada.")
         return
     try:
         with conn.cursor() as cur:
@@ -139,7 +137,7 @@ def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_dr
 def format_goals_card(league_info, home, away, match_time, odds_over, p_over, odds_btts, p_btts, odds_btts_1h, p_btts_1h, stake_over):
     ev_over = (p_over * odds_over) - 1
     if p_over >= 0.50 and ev_over > 0:
-        recommendation = "🟢 **Entrar a Más de 2.5 Goles**\n💡 <i> Alta probabilidad matemática y valor positivo detectado (+EV).</i>"
+        recommendation = "🟢 **Entrar a Más de 2.5 Goles**\n💡 <i>Alta probabilidad matemática y valor positivo detectado (+EV).</i>"
     elif p_over >= 0.42:
         recommendation = "🟡 **Mercado de Goles Moderado**\n💡 <i>Cuota atractiva, margen ajustado pero viable.</i>"
     else:
@@ -217,19 +215,16 @@ async def fetch_fixtures_from_api(date_str):
             response = await client.get(url, headers=headers, params=params)
             if response.status_code == 200:
                 fixtures = response.json().get("response", [])
-                
                 active_fixtures = []
                 now_utc = datetime.now(timezone.utc)
                 
                 for fix in fixtures:
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
                     date_iso = fix.get("fixture", {}).get("date")
-                    
                     if status_short == "NS" and date_iso:
                         fix_dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
                         if fix_dt > now_utc:
                             active_fixtures.append(fix)
-                
                 return active_fixtures if active_fixtures else []
     except Exception as e:
         logger.error(f"Error consultando API-Football: {e}")
@@ -244,7 +239,6 @@ def calculate_match_probabilities(lambda_home, lambda_away):
     p_away_win = 0.0
     p_over_25 = 0.0
     p_btts = 0.0
-    
     max_goals = 6
     
     for h in range(max_goals + 1):
@@ -262,7 +256,6 @@ def calculate_match_probabilities(lambda_home, lambda_away):
                 
             if (h + a) > 2.5:
                 p_over_25 += joint_prob
-                
             if h > 0 and a > 0:
                 p_btts += joint_prob
                 
@@ -283,23 +276,18 @@ async def fetch_team_statistics(team_id, league_id, season="2026"):
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url, headers=headers, params=params)
             if response.status_code == 200:
-                data = response.json().get("response", {})
-                return data
+                return response.json().get("response", {})
     except Exception as e:
         logger.error(f"Error obteniendo estadísticas para el equipo {team_id}: {e}")
     return {}
 
 async def generate_fixture_analytics_real(fix):
     calibration = get_learning_calibration_factor()
-    
     teams = fix.get("teams", {})
     league = fix.get("league", {})
     
-    home_team = teams.get("home", {})
-    away_team = teams.get("away", {})
-    
-    home_id = home_team.get("id", 0)
-    away_id = away_team.get("id", 0)
+    home_id = teams.get("home", {}).get("id", 0)
+    away_id = teams.get("away", {}).get("id", 0)
     league_id = league.get("id", 0)
     season = str(league.get("season", "2026"))
     
@@ -309,7 +297,6 @@ async def generate_fixture_analytics_real(fix):
     try:
         lambda_home_scored = float(home_stats.get("goals", {}).get("for", {}).get("average", {}).get("home", 1.45))
         lambda_home_conceded = float(home_stats.get("goals", {}).get("against", {}).get("average", {}).get("home", 1.05))
-        
         lambda_away_scored = float(away_stats.get("goals", {}).get("for", {}).get("average", {}).get("away", 1.15))
         lambda_away_conceded = float(away_stats.get("goals", {}).get("against", {}).get("average", {}).get("away", 1.35))
         
@@ -488,7 +475,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 league_name = fix.get("league", {}).get("name", "Liga")
                 match_time = format_match_time(fix)
                 
-                # Evaluamos el valor (Probabilidad * Cuota - 1)
                 p_over = analysis["goals"]["p_over_25"]
                 odds_over = analysis["goals"]["odds_over"]
                 ev_val = (p_over * odds_over) - 1
@@ -525,6 +511,55 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error(f"Error en Top Value: {e}")
             await update.message.reply_text("❌ Ocurrió un error al calcular el Top Value.", reply_markup=get_persistent_keyboard())
 
+    elif "Combinada" in text or "EV+" in text:
+        await update.message.reply_text("🍀 Generando combinada inteligente con valor esperado positivo (`+EV`) para hoy...", reply_markup=get_persistent_keyboard())
+        try:
+            fixtures_data = await fetch_fixtures_from_api(today_str)
+            valid_picks = []
+            
+            for fix in fixtures_data[:12]:
+                analysis = await generate_fixture_analytics_real(fix)
+                h_name = fix.get("teams", {}).get("home", {}).get("name", "Local")
+                a_name = fix.get("teams", {}).get("away", {}).get("name", "Visita")
+                
+                p_over = analysis["goals"]["p_over_25"]
+                odds_over = analysis["goals"]["odds_over"]
+                ev_val = (p_over * odds_over) - 1
+                
+                if ev_val > 0.02 and p_over >= 0.45:
+                    valid_picks.append({
+                        "match": f"{h_name} vs {a_name}",
+                        "market": "Over 2.5 Goles",
+                        "odds": odds_over,
+                        "prob": p_over
+                    })
+            
+            if len(valid_picks) >= 2:
+                # Tomamos las 2 mejores selecciones para la combinada
+                parlay_picks = valid_picks[:2]
+                combined_odds = round(parlay_picks[0]["odds"] * parlay_picks[1]["odds"], 2)
+                combined_prob = round(parlay_picks[0]["prob"] * parlay_picks[1]["prob"], 3)
+                
+                combinada_text = (
+                    f"🍀 **COMBINADA RECOMENDADA (+EV)** 🍀\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"1️⃣ <b>{parlay_picks[0]['match']}</b>\n"
+                    f"   └ <i>Mercado:</i> {parlay_picks[0]['market']} (Cuota: <code>{parlay_picks[0]['odds']}</code>)\n\n"
+                    f"2️⃣ <b>{parlay_picks[1]['match']}</b>\n"
+                    f"   └ <i>Mercado:</i> {parlay_picks[1]['market']} (Cuota: <code>{parlay_picks[1]['odds']}</code>)\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 <b>Cuota Combinada Total:</b> <code>{combined_odds}</code>\n"
+                    f"📈 <b>Probabilidad Conjunta Est.:</b> <code>{combined_prob*100:.1f}%</code>\n"
+                    f"💰 <b>Stake Sugerido (Conservador):</b> <code>0.5% - 1%</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━"
+                )
+                await update.message.reply_text(combinada_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
+            else:
+                await update.message.reply_text("⚠️ No hay suficientes partidos con EV positivo para armar una combinada segura hoy.", reply_markup=get_persistent_keyboard())
+        except Exception as e:
+            logger.error(f"Error generando combinada: {e}")
+            await update.message.reply_text("❌ Ocurrió un error al armar la combinada.", reply_markup=get_persistent_keyboard())
+
     elif "Ayuda" in text:
         help_text = (
             "📖 <b>GUÍA DE USO - BOT DE PRONÓSTICOS</b>\n\n"
@@ -535,9 +570,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "💡 <i>Gestiona siempre tu bankroll de forma responsable utilizando los porcentajes de Stake sugeridos.</i>"
         )
         await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
-
-    elif "Combinada" in text or "EV+" in text:
-        pass
     else:
         await update.message.reply_text(
             "Utiliza los botones del menú inferior para interactuar con el bot.",
@@ -550,29 +582,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data.startswith("savepick_"):
-        parts = data.split("_")
-        fid = int(parts[1])
-        market = parts[2]
-        odds = float(parts[3])
-        stake = float(parts[4])
-        
-        conn = get_db_connection()
-        if conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO user_picks (fixture_id, market_type, odds, probability, stake) VALUES (%s, %s, %s, %s, %s)",
-                        (fid, market, odds, 0.65, stake)
-                    )
-                    conn.commit()
-                await query.answer("✅ ¡Pick guardado con éxito para seguimiento y auto-aprendizaje!", show_alert=True)
-            except Exception as e:
-                logger.error(f"Error guardando pick: {e}")
-                await query.answer("❌ Error al guardar el pick.", show_alert=True)
-            finally:
-                conn.close()
-        else:
-            await query.answer("⚠ Base de datos no disponible.", show_alert=True)
+        try:
+            parts = data.split("_")
+            fid = int(parts[1])
+            stake = float(parts[-1])
+            odds = float(parts[-2])
+            market = "_".join(parts[2:-2])
+            
+            conn = get_db_connection()
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO user_picks (fixture_id, market_type, odds, probability, stake) VALUES (%s, %s, %s, %s, %s)",
+                            (fid, market, odds, 0.65, stake)
+                        )
+                        conn.commit()
+                    await query.answer("✅ ¡Pick guardado con éxito para seguimiento!", show_alert=True)
+                except Exception as e:
+                    logger.error(f"Error guardando pick en DB: {e}")
+                    await query.answer("❌ Error al guardar en base de datos.", show_alert=True)
+                finally:
+                    conn.close()
+            else:
+                await query.answer("⚠️ Base de datos no disponible.", show_alert=True)
+        except Exception as e:
+            logger.error(f"Error procesando savepick: {e}")
+            await query.answer("❌ Error procesando el pick.", show_alert=True)
         return
 
     elif data.startswith("loadfixtures_catgoals_"):
@@ -581,7 +617,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos de Goles ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️️ No se encontraron partidos pendientes para esta fecha.")
             return
             
         shown_count = 0
@@ -609,7 +645,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
         
         if shown_count == 0:
-            await query.message.reply_text("ℹ No se encontraron partidos que cumplan con el filtro estricto de cuotas mínimas (+EV) para esta fecha.")
+            await query.message.reply_text("ℹ No se encontraron partidos que cumplan con el filtro estricto para esta fecha.")
 
     elif data.startswith("loadfixtures_cat1x2_"):
         parts = data.split("_")
