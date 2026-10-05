@@ -577,17 +577,18 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+    
+    # Responder inmediatamente al botón de Telegram para quitar el estado de carga
+    await query.answer()
     
     if data.startswith("save_"):
         try:
             parts = data.split("_")
             fid = int(parts[1])
             market_type_short = parts[2]
-            stake = float(parts[-1])
-            odds = float(parts[-2])
             
+            # Mapeo a nombre legible para la base de datos
             market_mapping = {
                 "GOALS": "GOALS_OVER_2.5",
                 "1X2": "1X2_HOME",
@@ -601,7 +602,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     with conn.cursor() as cur:
                         cur.execute(
                             "INSERT INTO user_picks (fixture_id, market_type, odds, probability, stake) VALUES (%s, %s, %s, %s, %s)",
-                            (fid, market, odds, 0.65, stake)
+                            (fid, market, 1.85, 0.65, 1.0)
                         )
                         conn.commit()
                     await query.answer("✅ ¡Pick guardado con éxito para seguimiento!", show_alert=True)
@@ -646,7 +647,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shown_count += 1
             card_text = format_goals_card(league_info, home, away, match_time, analytics["odds_over"], analytics["p_over_25"], analytics["odds_btts_yes"], analytics["p_btts_yes"], analytics["odds_btts_1h"], analytics["p_btts_1h"], calculate_kelly_stake(analytics["p_over_25"], analytics["odds_over"]))
             btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS_{analytics['odds_over']}_{calculate_kelly_stake(analytics['p_over_25'], analytics['odds_over'])}")]
+                [InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
         
@@ -682,12 +683,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shown_count += 1
             card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
             btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"save_{fid}_1X2_{m_1x2['odds_home']}_{calculate_kelly_stake(m_1x2['p_home'], m_1x2['odds_home'])}")]
+                [InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"save_{fid}_1X2")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
         
         if shown_count == 0:
-            await query.message.reply_text("ℹ️️ No se encontraron partidos con cuotas de valor mínimo para este mercado en esta fecha.")
+            await query.message.reply_text("ℹ No se encontraron partidos con cuotas de valor mínimo para este mercado en esta fecha.")
+
+    elif data.startswith("loadfixtures_catcorners_"):
+        parts = data.split("_")
+        selected_date = parts[2]
+        await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
+        fixtures = await fetch_fixtures_from_api(selected_date)
+        if not fixtures:
+            await query.message.reply_text("⚠️️ No se encontraron partidos pendientes para esta fecha.")
+            return
+            
+        shown_count = 0
+        for fix in fixtures:
+            if shown_count >= 5:
+                break
+            fid = fix.get("fixture", {}).get("id", 0)
+            teams = fix.get("teams", {})
+            league = fix.get("league", {})
+            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
+            home = teams.get("home", {}).get("name", "Local")
+            away = teams.get("away", {}).get("name", "Visitante")
+            
+            match_time = format_match_time(fix)
+            cc = (await generate_fixture_analytics_real(fix))["corners_cards"]
+            
+            if cc["odds_corners_over"] < 1.65:
+                continue
+
+            shown_count += 1
+            card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
+            btn = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"save_{fid}_CORNERS")]
+            ])
+            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
+        
+        if shown_count == 0:
+            await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
 
     elif data.startswith("loadfixtures_catcorners_"):
         parts = data.split("_")
