@@ -63,6 +63,7 @@ def init_db():
         return
     try:
         with conn.cursor() as cur:
+            # Tabla de picks
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_picks (
                     id SERIAL PRIMARY KEY,
@@ -76,12 +77,41 @@ def init_db():
                 );
             """)
             cur.execute("ALTER TABLE user_picks ADD COLUMN IF NOT EXISTS probability FLOAT;")
+            
+            # Tabla de usuarios
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    telegram_id BIGINT PRIMARY KEY,
+                    username VARCHAR(100),
+                    role VARCHAR(20) DEFAULT 'user',
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             conn.commit()
-            logger.info("Base de datos inicializada correctamente.")
+            logger.info("Base de datos y tablas inicializadas correctamente.")
     except Exception as e:
         logger.error(f"Error al crear tablas: {e}")
     finally:
         conn.close()
+
+async def register_user_middleware(update: Update):
+    user = update.effective_user
+    if not user:
+        return
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bot_users (telegram_id, username) 
+                    VALUES (%s, %s) 
+                    ON CONFLICT (telegram_id) DO UPDATE SET username = EXCLUDED.username;
+                """, (user.id, user.username or user.first_name))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error registrando usuario: {e}")
+        finally:
+            conn.close()
 
 # ==========================================
 # ⌨️ TECLADO INFERIOR (REPLY KEYBOARD)
@@ -367,6 +397,7 @@ def calculate_kelly_stake(probability, odds):
 # ==========================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await register_user_middleware(update)
     today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
     tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
     
@@ -385,6 +416,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.message or not update.message.text:
         return
         
+    await register_user_middleware(update)
     text = update.message.text.strip()
     logger.info(f"Mensaje recibido de Telegram: '{text}'")
     
@@ -445,7 +477,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     if not breakdown_text:
                         breakdown_text = "  <i>Sin apuestas liquidadas aún.</i>"
 
-                    # Botón interactivo para administrar picks guardados
                     admin_keyboard = InlineKeyboardMarkup([
                         [InlineKeyboardButton("📋 Gestionar / Ver mis Picks Guardados", callback_data="manage_picks_list")]
                     ])
@@ -570,6 +601,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         pending_picks = 0
         won_picks = 0
         lost_picks = 0
+        total_users = 0
         if conn:
             try:
                 with conn.cursor() as cur:
@@ -586,12 +618,16 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     pending_picks = res['pending'] or 0
                     won_picks = res['won'] or 0
                     lost_picks = res['lost'] or 0
+
+                    cur.execute("SELECT COUNT(*) as total FROM bot_users;")
+                    total_users = cur.fetchone()['total'] or 0
             except Exception as e:
                 logger.error(f"Error consultando panel admin: {e}")
             finally:
                 conn.close()
 
         admin_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 Gestionar Usuarios", callback_data="admin_list_users")],
             [InlineKeyboardButton("🔄 Forzar Auto-Liquidación", callback_data="admin_force_settle")],
             [InlineKeyboardButton("📋 Listar Picks Registrados", callback_data="manage_picks_list")],
             [InlineKeyboardButton("⚠️ Vaciar / Limpiar Base de Datos", callback_data="admin_purge_db")]
@@ -600,7 +636,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         admin_text = (
             "⚙️ <b>PANEL DE ADMINISTRACIÓN GENERAL</b>\n"
             "━━━━━━━━━━━━━━━━━━━\n"
-            f"• 🗄️️ <b>Total Picks en DB:</b> <code>{total_picks}</code>\n"
+            f"• 👥 <b>Usuarios Registrados:</b> <code>{total_users}</code>\n"
+            f"• 🗄 <b>Total Picks en DB:</b> <code>{total_picks}</code>\n"
             f"• ⏳ <b>Pendientes:</b> <code>{pending_picks}</code> | ✅ <b>Ganadas:</b> <code>{won_picks}</code> | ❌ <b>Perdidas:</b> <code>{lost_picks}</code>\n"
             f"• 🤖 <b>Estado del Bot:</b> <code>ONLINE (Activo)</code>\n"
             f"• 🌐 <b>API-Football:</b> <code>Conectado</code>\n"
@@ -614,9 +651,9 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "📖 <b>GUÍA DE USO & CONTROL TOTAL</b>\n\n"
             "• ⚽ <b>1X2 / Ganador & Goles:</b> Analiza partidos mediante Poisson y guarda tus selecciones.\n"
             "• 📊 <b>Mis Estadísticas:</b> Visualiza tus aciertos y accede a la gestión y modificación de tus picks guardados.\n"
-            "• ⚙️ <b>Panel Admin:</b> Controla registros de base de datos, fuerza liquidaciones manuales y purga datos obsoletos.\n"
+            "• ⚙️ <b>Panel Admin:</b> Administra usuarios, controla registros de base de datos, fuerza liquidaciones y purga datos.\n"
             "• 🎯 <b>Top Value +EV:</b> Encuentra la oportunidad más rentable del día al instante.\n\n"
-            "💡 <i>Utiliza los botones interactivos para modificar o borrar registros en tiempo real.</i>"
+            "💡 <i>Utiliza los botones interactivos para modificar o borrar registros y usuarios en tiempo real.</i>"
         )
         await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
     else:
@@ -746,10 +783,80 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 finally:
                     conn.close()
 
-    # 4. Acciones de Panel Admin (Forzar liquidación o purgar DB)
+    # 4. Gestión de Usuarios (Panel Admin)
+    elif data == "admin_list_users":
+        conn = get_db_connection()
+        if not conn:
+            await query.message.reply_text("⚠️ Base de datos no disponible.")
+            return
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT telegram_id, username, role FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
+                users = cur.fetchall()
+                if not users:
+                    await query.message.reply_text("📭 No hay usuarios registrados en el sistema.")
+                    return
+                for u in users:
+                    uid = u['telegram_id']
+                    uname = u['username'] or "Sin Alias"
+                    role = u['role']
+                    
+                    user_kb = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("⭐ Cambiar Rol", callback_data=f"user_role_{uid}"),
+                            InlineKeyboardButton("🗑️ Eliminar", callback_data=f"user_del_{uid}")
+                        ]
+                    ])
+                    await query.message.reply_text(
+                        f"👤 <b>Usuario:</b> {uname}\n• ID: <code>{uid}</code>\n• Rol actual: <code>{role}</code>",
+                        parse_mode="HTML", reply_markup=user_kb
+                    )
+        except Exception as e:
+            logger.error(f"Error listando usuarios: {e}")
+            await query.message.reply_text("❌ Error al recuperar los usuarios.")
+        finally:
+            conn.close()
+
+    elif data.startswith("user_role_"):
+        uid = int(data.split("_")[2])
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT role FROM bot_users WHERE telegram_id = %s", (uid,))
+                    res = cur.fetchone()
+                    if res:
+                        current_role = res['role']
+                        new_role = "admin" if current_role == "user" else "user"
+                        cur.execute("UPDATE bot_users SET role = %s WHERE telegram_id = %s", (new_role, uid))
+                        conn.commit()
+                        await query.answer(f"✅ Rol cambiado a {new_role}", show_alert=True)
+                        await query.message.edit_text(f"⭐ <b>El rol del usuario ID {uid} ha sido actualizado a:</b> <code>{new_role}</code>", parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error cambiando rol de usuario {uid}: {e}")
+                await query.answer("❌ Error al cambiar el rol.", show_alert=True)
+            finally:
+                conn.close()
+
+    elif data.startswith("user_del_"):
+        uid = int(data.split("_")[2])
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM bot_users WHERE telegram_id = %s", (uid,))
+                    conn.commit()
+                await query.answer(f"🗑️ Usuario {uid} eliminado correctamente", show_alert=True)
+                await query.message.edit_text(f"🗑️ <b>Usuario con ID {uid} eliminado del sistema.</b>", parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error borrando usuario {uid}: {e}")
+                await query.answer("❌ Error al eliminar el usuario.", show_alert=True)
+            finally:
+                conn.close()
+
+    # 5. Acciones de Panel Admin (Forzar liquidación o purgar DB)
     elif data == "admin_force_settle":
         await query.message.edit_text("🔄 <b>Ejecutando revisión y liquidación manual de partidos pendientes...</b>", parse_mode="HTML")
-        # Disparamos una pasada rápida del worker
         asyncio.create_task(run_manual_settlement(query))
 
     elif data == "admin_purge_db":
@@ -759,15 +866,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM user_picks;")
                     conn.commit()
-                await query.answer("⚠️ Base de datos purgada con éxito.", show_alert=True)
-                await query.message.edit_text("🧹 <b>Se han eliminado todos los registros de la base de datos.</b>", parse_mode="HTML")
+                await query.answer("⚠️ Base de datos de picks purgada con éxito.", show_alert=True)
+                await query.message.edit_text("🧹 <b>Se han eliminado todos los registros de picks de la base de datos.</b>", parse_mode="HTML")
             except Exception as e:
                 logger.error(f"Error purgando DB: {e}")
                 await query.answer("❌ Error al purgar.", show_alert=True)
             finally:
                 conn.close()
 
-    # 5. Carga de Fixtures por Categorías y Fechas
+    # 6. Carga de Fixtures por Categorías y Fechas
     elif data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
@@ -1006,7 +1113,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con opciones avanzadas de administración y gestión de picks...")
+    logger.info("Iniciando bot con opciones avanzadas de administración, usuarios y gestión de picks...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
