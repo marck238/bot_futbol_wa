@@ -590,7 +590,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 await update.message.reply_text(combinada_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
             else:
-                await update.message.reply_text("⚠️ No hay suficientes partidos con EV positivo para armar una combinada segura hoy.", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text("⚠️️ No hay suficientes partidos con EV positivo para armar una combinada segura hoy.", reply_markup=get_persistent_keyboard())
         except Exception as e:
             logger.error(f"Error generando combinada: {e}")
             await update.message.reply_text("❌ Ocurrió un error al armar la combinada.", reply_markup=get_persistent_keyboard())
@@ -627,7 +627,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 conn.close()
 
         admin_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👥 Gestionar Usuarios", callback_data="admin_list_users")],
+            [InlineKeyboardButton("👥 Gestionar Usuarios", callback_data="admin_manage_users")],
             [InlineKeyboardButton("🔄 Forzar Auto-Liquidación", callback_data="admin_force_settle")],
             [InlineKeyboardButton("📋 Listar Picks Registrados", callback_data="manage_picks_list")],
             [InlineKeyboardButton("⚠️ Vaciar / Limpiar Base de Datos", callback_data="admin_purge_db")]
@@ -783,7 +783,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 finally:
                     conn.close()
 
-    # 4. Gestión de Usuarios (Panel Admin)
+    # 4. Gestión de Usuarios (Panel Admin con Agregar, Modificar, Listar y Eliminar)
+    elif data == "admin_manage_users":
+        user_menu_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("➕ Agregar Usuario", callback_data="admin_add_user"),
+                InlineKeyboardButton("✏️ Modificar Usuario", callback_data="admin_modify_user")
+            ],
+            [
+                InlineKeyboardButton("📋 Listar Usuarios", callback_data="admin_list_users"),
+                InlineKeyboardButton("🗑️ Eliminar Usuario", callback_data="admin_delete_user_prompt")
+            ],
+            [
+                InlineKeyboardButton("🔙 Volver al Panel", callback_data="admin_back_main")
+            ]
+        ])
+        await query.message.edit_text(
+            "👥 <b>PANEL DE GESTIÓN DE USUARIOS</b>\nSelecciona una opción administrativa:",
+            parse_mode="HTML",
+            reply_markup=user_menu_kb
+        )
+
+    elif data == "admin_add_user":
+        await query.message.edit_text(
+            "➕ <b>Agregar Usuario</b>\nEnvía el ID de Telegram y el alias del nuevo usuario que deseas registrar en el sistema.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_manage_users")]])
+        )
+
+    elif data == "admin_modify_user":
+        await query.message.edit_text(
+            "✏️️ <b>Modificar Usuario</b>\nSelecciona el usuario que deseas modificar o actualiza sus permisos/datos.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_manage_users")]])
+        )
+
+    elif data == "admin_delete_user_prompt":
+        await query.message.edit_text(
+            "🗑️ <b>Eliminar Usuario</b>\nSelecciona el usuario que deseas remover de la base de datos.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_manage_users")]])
+        )
+
     elif data == "admin_list_users":
         conn = get_db_connection()
         if not conn:
@@ -805,7 +846,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         [
                             InlineKeyboardButton("⭐ Cambiar Rol", callback_data=f"user_role_{uid}"),
                             InlineKeyboardButton("🗑️ Eliminar", callback_data=f"user_del_{uid}")
-                        ]
+                        ],
+                        [InlineKeyboardButton("🔙 Volver a Gestión", callback_data="admin_manage_users")]
                     ])
                     await query.message.reply_text(
                         f"👤 <b>Usuario:</b> {uname}\n• ID: <code>{uid}</code>\n• Rol actual: <code>{role}</code>",
@@ -847,7 +889,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute("DELETE FROM bot_users WHERE telegram_id = %s", (uid,))
                     conn.commit()
                 await query.answer(f"🗑️ Usuario {uid} eliminado correctamente", show_alert=True)
-                await query.message.edit_text(f"🗑️ <b>Usuario con ID {uid} eliminado del sistema.</b>", parse_mode="HTML")
+                await query.message.edit_text(f"🗑️️ <b>Usuario con ID {uid} eliminado del sistema.</b>", parse_mode="HTML")
             except Exception as e:
                 logger.error(f"Error borrando usuario {uid}: {e}")
                 await query.answer("❌ Error al eliminar el usuario.", show_alert=True)
