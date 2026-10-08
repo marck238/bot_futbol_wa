@@ -63,7 +63,6 @@ def init_db():
         return
     try:
         with conn.cursor() as cur:
-            # Tabla de picks
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_picks (
                     id SERIAL PRIMARY KEY,
@@ -78,7 +77,6 @@ def init_db():
             """)
             cur.execute("ALTER TABLE user_picks ADD COLUMN IF NOT EXISTS probability FLOAT;")
             
-            # Tabla de usuarios
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bot_users (
                     telegram_id BIGINT PRIMARY KEY,
@@ -114,18 +112,36 @@ async def register_user_middleware(update: Update):
             conn.close()
 
 # ==========================================
-# ⌨️ TECLADO INFERIOR (REPLY KEYBOARD EXPANDIDO)
+# ⌨️ TECLADO INFERIOR (REPLY KEYBOARD LIMPIO)
 # ==========================================
 
 def get_persistent_keyboard():
+    # Menú inferior ordenado y sin duplicaciones
     keyboard = [
         [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
-        [KeyboardButton("🛡️ Doble Oportunidad"), KeyboardButton("🔥 BTTS & Más de 2.5")],
-        [KeyboardButton("⚖️ Handicap Asiático"), KeyboardButton("🚩 Córners & Tarjetas")],
-        [KeyboardButton("🍀 Combinadas EV+"), KeyboardButton("📊 Mis Estadísticas")],
-        [KeyboardButton("🎯 Top Value +EV"), KeyboardButton("📖 Ayuda"), KeyboardButton("⚙️ Panel Admin")]
+        [KeyboardButton("🛡️ Doble Oportunidad"), KeyboardButton("⚖️ Handicap Asiático")],
+        [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🍀 Combinadas EV+")],
+        [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("🎯 Top Value +EV")],
+        [KeyboardButton("📖 Ayuda"), KeyboardButton("⚙️ Panel Admin")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# ==========================================
+# 📅 GENERADOR DE TECLADO DE FECHAS (HOY, MAÑANA, PASADO)
+# ==========================================
+
+def get_fecha_selector_keyboard(prefix: str):
+    tz = timezone(timedelta(hours=-3))
+    hoy = datetime.now(tz).date()
+    mañana = hoy + timedelta(days=1)
+    pasado = hoy + timedelta(days=2)
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Partidos de hoy", callback_data=f"loadfixtures_{prefix}_{hoy.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Partidos de mañana", callback_data=f"loadfixtures_{prefix}_{mañana.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Partidos de pasado mañana", callback_data=f"loadfixtures_{prefix}_{pasado.strftime('%Y-%m-%d')}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 # ==========================================
 # 🎨 FUNCIONES DE FORMATO Y DISEÑO (TARJETAS)
@@ -198,19 +214,6 @@ def format_double_chance_card(league_info, home, away, match_time, p_1x, odds_1x
         f"🎯 <b>Acción Sugerida:</b>\n"
         f"🟢 <i>Ideal para combinar o cubrir riesgos en partidos disputados. Cobertura estadística alta.</i>\n\n"
         f"💰 <b>Stake Kelly:</b> <code>{stake_dc}% de tu bankroll</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━"
-    )
-
-def format_btts_over_card(league_info, home, away, match_time, p_combo, odds_combo, stake_combo):
-    return (
-        f"🔥 <b>{home} vs {away}</b>\n"
-        f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🔥 <b>COMBO: AMBOS ANOTAN + MÁS DE 2.5</b>\n\n"
-        f"• ⚽⚽ <b>Sí & Más de 2.5 Goles:</b> {odds_combo:.2f}  <code>({p_combo*100:.1f}%)</code>\n\n"
-        f"🎯 <b>Acción Sugerida:</b>\n"
-        f"🟢 <i>Recomendado para encuentros abiertos con alta producción ofensiva y defensas vulnerables.</i>\n\n"
-        f"💰 <b>Stake Kelly:</b> <code>{stake_combo}% de tu bankroll</code>\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -389,10 +392,8 @@ async def generate_fixture_analytics_real(fix):
     p_btts = min(0.95, poisson_res["p_btts"] * calibration)
     p_btts_1h = min(0.95, 0.350 * calibration)
 
-    # Probabilidades y mercados ampliados
     p_1x = min(0.95, p_home + p_draw)
     p_x2 = min(0.95, p_away + p_draw)
-    p_btts_over = min(0.90, p_btts * p_over * 1.15)
     p_ah_home = p_home
 
     margin = 1.05
@@ -404,7 +405,6 @@ async def generate_fixture_analytics_real(fix):
     
     odds_1x = round(margin / max(0.05, p_1x), 2)
     odds_x2 = round(margin / max(0.05, p_x2), 2)
-    odds_btts_over = round(margin / max(0.05, p_btts_over), 2)
     odds_ah_home = round(margin / max(0.05, p_ah_home), 2)
 
     offensive_intensity = lambda_home + lambda_away
@@ -428,9 +428,6 @@ async def generate_fixture_analytics_real(fix):
         },
         "double_chance": {
             "p_1x": p_1x, "odds_1x": odds_1x, "p_x2": p_x2, "odds_x2": odds_x2
-        },
-        "btts_over": {
-            "p_combo": p_btts_over, "odds_combo": odds_btts_over
         },
         "asian_handicap": {
             "p_ah_home": p_ah_home, "odds_ah_home": odds_ah_home
@@ -459,19 +456,12 @@ def calculate_kelly_stake(probability, odds):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_middleware(update)
-    today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
-    tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    keyboard = [
-        [InlineKeyboardButton("📅 Partidos de Hoy", callback_data=f"loadfixtures_catgoals_{today_str}")],
-        [InlineKeyboardButton("📅 Partidos de Mañana", callback_data=f"loadfixtures_catgoals_{tomorrow_str}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "🗓️ <b>Selecciona la fecha para analizar Goles & BTTS:</b>"
-    
     if update.message:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
-        await update.message.reply_text("👇 Utiliza el menú inferior para cambiar de sección:", reply_markup=get_persistent_keyboard())
+        await update.message.reply_text(
+            "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\nUtiliza el menú inferior para seleccionar el mercado de apuestas que deseas analizar:",
+            parse_mode="HTML",
+            reply_markup=get_persistent_keyboard()
+        )
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -481,50 +471,43 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     text = update.message.text.strip()
     logger.info(f"Mensaje recibido de Telegram: '{text}'")
     
-    today_str = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d")
-    tomorrow_str = (datetime.now(timezone(timedelta(hours=-3))) + timedelta(days=1)).strftime("%Y-%m-%d")
+    tz_uy = timezone(timedelta(hours=-3))
+    today_str = datetime.now(tz_uy).strftime("%Y-%m-%d")
     
     if "Goles & BTTS" in text:
-        keyboard = [
-            [InlineKeyboardButton("📅 Partidos de Hoy", callback_data=f"loadfixtures_catgoals_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana", callback_data=f"loadfixtures_catgoals_{tomorrow_str}")]
-        ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Goles & BTTS:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "🗓️ <b>Selecciona el rango de fecha para Goles & BTTS:</b>",
+            parse_mode="HTML",
+            reply_markup=get_fecha_selector_keyboard("catgoals")
+        )
         
     elif "1X2 / Ganador" in text:
-        keyboard = [
-            [InlineKeyboardButton("📅 Partidos de Hoy (1X2)", callback_data=f"loadfixtures_cat1x2_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana (1X2)", callback_data=f"loadfixtures_cat1x2_{tomorrow_str}")]
-        ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Mercado 1X2:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "🗓️ <b>Selecciona el rango de fecha para Mercado 1X2:</b>",
+            parse_mode="HTML",
+            reply_markup=get_fecha_selector_keyboard("cat1x2")
+        )
 
     elif "Doble Oportunidad" in text:
-        keyboard = [
-            [InlineKeyboardButton("📅 Partidos de Hoy (D.O.)", callback_data=f"loadfixtures_catdc_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana (D.O.)", callback_data=f"loadfixtures_catdc_{tomorrow_str}")]
-        ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Doble Oportunidad:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif "BTTS & Más de 2.5" in text:
-        keyboard = [
-            [InlineKeyboardButton("📅 Partidos de Hoy (Combo)", callback_data=f"loadfixtures_catbttsover_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana (Combo)", callback_data=f"loadfixtures_catbttsover_{tomorrow_str}")]
-        ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Combo BTTS + Over:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "🗓️ <b>Selecciona el rango de fecha para Doble Oportunidad:</b>",
+            parse_mode="HTML",
+            reply_markup=get_fecha_selector_keyboard("catdc")
+        )
 
     elif "Handicap Asiático" in text:
-        keyboard = [
-            [InlineKeyboardButton("📅 Partidos de Hoy (Handicap)", callback_data=f"loadfixtures_catah_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana (Handicap)", callback_data=f"loadfixtures_catah_{tomorrow_str}")]
-        ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Handicap Asiático:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "🗓️ <b>Selecciona el rango de fecha para Handicap Asiático:</b>",
+            parse_mode="HTML",
+            reply_markup=get_fecha_selector_keyboard("catah")
+        )
         
     elif "Córners & Tarjetas" in text:
-        keyboard = [
-            [InlineKeyboardButton("📅 Partidos de Hoy (Córners)", callback_data=f"loadfixtures_catcorners_{today_str}")],
-            [InlineKeyboardButton("📅 Partidos de Mañana (Córners)", callback_data=f"loadfixtures_catcorners_{tomorrow_str}")]
-        ]
-        await update.message.reply_text("🗓️ <b>Selecciona la fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "🗓️ <b>Selecciona el rango de fecha para Córners & Tarjetas:</b>",
+            parse_mode="HTML",
+            reply_markup=get_fecha_selector_keyboard("catcorners")
+        )
         
     elif "Mis Estadísticas" in text:
         conn = get_db_connection()
@@ -732,7 +715,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         help_text = (
             "📖 <b>GUÍA DE USO & NUEVOS MERCADOS</b>\n\n"
             "• ⚽ <b>1X2, Goles & Doble Oportunidad:</b> Analiza partidos con modelos Poisson mejorados.\n"
-            "• 🔥 <b>BTTS & Más de 2.5:</b> Oportunidades combinadas de alta rentabilidad ofensiva.\n"
             "• ⚖️ <b>Handicap Asiático:</b> Apuestas de valor con cobertura de empate (-0.5).\n"
             "• 📊 <b>Mis Estadísticas:</b> Visualiza tus aciertos, gestiona o modifica tus selecciones guardadas.\n\n"
             "💡 <i>Usa los botones del teclado inferior para explorar todos los mercados disponibles en tiempo real.</i>"
@@ -764,7 +746,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "GOALS": "GOALS_OVER_2.5",
                 "1X2": "1X2_HOME",
                 "DC": "DOUBLE_CHANCE",
-                "BTTSOVER": "BTTS_AND_OVER_2.5",
                 "AH": "ASIAN_HANDICAP_-0.5",
                 "CORNERS": "CORNERS_OVER_8.5"
             }
@@ -792,7 +773,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Error procesando el pick.", show_alert=True)
         return
 
-    # 2. Listado para gestionar picks (Modificar / Borrar / Marcar)
+    # 2. Listado para gestionar picks
     elif data == "manage_picks_list":
         conn = get_db_connection()
         if not conn:
@@ -833,7 +814,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             conn.close()
 
-    # 3. Acciones sobre un Pick específico (Ganada, Perdida, Borrar)
+    # 3. Acciones sobre un Pick específico
     elif data.startswith("pick_set_") or data.startswith("pick_del_"):
         parts = data.split("_")
         if data.startswith("pick_set_"):
@@ -1000,7 +981,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 conn.close()
 
-    # 5. Carga de Fixtures por Categorías Ampliadas
+    # 5. Carga de Fixtures por Categorías Ampliadas con Fechas Dinámicas
     elif data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
@@ -1100,36 +1081,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(dc["p_1x"], dc["odds_1x"]))
             btn = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📌 Guardar Doble Oportunidad (1X)", callback_data=f"save_{fid}_DC")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-
-    elif data.startswith("loadfixtures_catbttsover_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        await query.message.edit_text(f"🔍 <b>Consultando Combos BTTS + Over ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            bo = (await generate_fixture_analytics_real(fix))["btts_over"]
-
-            shown_count += 1
-            card_text = format_btts_over_card(league_info, home, away, match_time, bo["p_combo"], bo["odds_combo"], calculate_kelly_stake(bo["p_combo"], bo["odds_combo"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar BTTS + Over", callback_data=f"save_{fid}_BTTSOVER")]
             ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
 
@@ -1243,8 +1194,6 @@ async def run_manual_settlement(query):
                                     won = True
                                 elif "DOUBLE_CHANCE" in market and goals_home >= goals_away:
                                     won = True
-                                elif "BTTS_AND_OVER_2.5" in market and goals_home > 0 and goals_away > 0 and total_goals > 2.5:
-                                    won = True
                                 elif "ASIAN_HANDICAP" in market and goals_home > goals_away:
                                     won = True
                                 elif "CORNERS" in market:
@@ -1301,8 +1250,6 @@ async def auto_settlement_background_task():
                                             won = True
                                         elif "DOUBLE_CHANCE" in market and goals_home >= goals_away:
                                             won = True
-                                        elif "BTTS_AND_OVER_2.5" in market and goals_home > 0 and goals_away > 0 and total_goals > 2.5:
-                                            won = True
                                         elif "ASIAN_HANDICAP" in market and goals_home > goals_away:
                                             won = True
                                         elif "CORNERS" in market:
@@ -1341,7 +1288,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con nuevos tipos de apuestas y mercados ampliados...")
+    logger.info("Iniciando bot con menú de fechas dinámico (hoy, mañana, pasado mañana)...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
