@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 import asyncio
 import math
@@ -116,7 +116,6 @@ async def register_user_middleware(update: Update):
 # ==========================================
 
 def get_persistent_keyboard():
-    # Menú inferior ordenado y sin duplicaciones
     keyboard = [
         [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
         [KeyboardButton("🛡️ Doble Oportunidad"), KeyboardButton("⚖️ Handicap Asiático")],
@@ -248,6 +247,31 @@ def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_
         f"  └ <i>Más de 4.5 Tarjetas:</i> {odds_cards_over:.2f} <code>({p_cards*100:.1f}%)</code>\n\n"
         f"🎯 <b>Acción Sugerida:</b>\n{recommendation}\n\n"
         f"💰 <b>Stake Kelly (Córners):</b> <code>{stake_corners}% de tu bankroll</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━"
+    )
+
+def format_all_markets_card(league_info, home, away, match_time, analytics):
+    m_1x2 = analytics["market_1x2"]
+    goals = analytics["goals"]
+    dc = analytics["double_chance"]
+    ah = analytics["asian_handicap"]
+    cc = analytics["corners_cards"]
+
+    return (
+        f"⚽ <b>{home} vs {away}</b>\n"
+        f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>RESUMEN DE OPCIONES VIABLES (+EV)</b>\n\n"
+        f"• 🏆 <b>1X2 / Ganador:</b>\n"
+        f"  └ <i>Local:</i> {m_1x2['odds_home']} ({m_1x2['p_home']*100:.1f}%) | <i>Visita:</i> {m_1x2['odds_away']} ({m_1x2['p_away']*100:.1f}%)\n\n"
+        f"• 📈 <b>Goles & BTTS:</b>\n"
+        f"  └ <i>Más de 2.5:</i> {goals['odds_over']} ({goals['p_over_25']*100:.1f}%) | <i>BTTS:</i> {goals['odds_btts_yes']} ({goals['p_btts_yes']*100:.1f}%)\n\n"
+        f"• 🛡️ <b>Doble Oportunidad:</b>\n"
+        f"  └ <i>1X:</i> {dc['odds_1x']} ({dc['p_1x']*100:.1f}%) | <i>X2:</i> {dc['odds_x2']} ({dc['p_x2']*100:.1f}%)\n\n"
+        f"• ⚖️ <b>Handicap Asiático:</b>\n"
+        f"  └ <i>Local (-0.5):</i> {ah['odds_ah_home']} ({ah['p_ah_home']*100:.1f}%)\n\n"
+        f"• 🚩 <b>Córners (Over 8.5):</b>\n"
+        f"  └ <i>Cuota:</i> {cc['odds_corners_over']} (Prob: {cc['p_corners']*100:.1f}%)\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -458,7 +482,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_middleware(update)
     if update.message:
         await update.message.reply_text(
-            "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\nUtiliza el menú inferior para seleccionar el mercado de apuestas que deseas analizar:",
+            "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\nUtiliza el menú inferior para seleccionar el mercado de apuestas o escribe directamente el nombre de cualquier equipo para buscar su pronóstico:",
             parse_mode="HTML",
             reply_markup=get_persistent_keyboard()
         )
@@ -716,13 +740,61 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "📖 <b>GUÍA DE USO & NUEVOS MERCADOS</b>\n\n"
             "• ⚽ <b>1X2, Goles & Doble Oportunidad:</b> Analiza partidos con modelos Poisson mejorados.\n"
             "• ⚖️ <b>Handicap Asiático:</b> Apuestas de valor con cobertura de empate (-0.5).\n"
-            "• 📊 <b>Mis Estadísticas:</b> Visualiza tus aciertos, gestiona o modifica tus selecciones guardadas.\n\n"
+            "• 📊 <b>Mis Estadísticas:</b> Visualiza tus aciertos, gestiona o modifica tus selecciones guardadas.\n"
+            "• 🔍 <b>Búsqueda Manual:</b> Escribe el nombre de cualquier equipo en el chat para obtener un reporte completo con todas las opciones viables.\n\n"
             "💡 <i>Usa los botones del teclado inferior para explorar todos los mercados disponibles en tiempo real.</i>"
         )
         await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
+        
     else:
+        # Búsqueda manual de partido por nombre de equipo (cuando no coincide con ningún menú)
+        if len(text) > 2 and not text.startswith("/"):
+            await update.message.reply_text(f"🔍 Buscando opciones viables para: <b>{text}</b>...", parse_mode="HTML")
+            
+            tomorrow_str = (datetime.now(tz_uy) + timedelta(days=1)).strftime("%Y-%m-%d")
+            fixtures = await fetch_fixtures_from_api(today_str) + await fetch_fixtures_from_api(tomorrow_str)
+            found_fix = None
+            
+            search_query = text.lower()
+            for fix in fixtures:
+                home = fix.get("teams", {}).get("home", {}).get("name", "").lower()
+                away = fix.get("teams", {}).get("away", {}).get("name", "").lower()
+                if search_query in home or search_query in away:
+                    found_fix = fix
+                    break
+                    
+            if found_fix:
+                fix_id = found_fix.get("fixture", {}).get("id", 0)
+                league = found_fix.get("league", {})
+                league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
+                home_name = found_fix.get("teams", {}).get("home", {}).get("name", "Local")
+                away_name = found_fix.get("teams", {}).get("away", {}).get("name", "Visitante")
+                match_time = format_match_time(found_fix)
+                
+                analytics_full = await generate_fixture_analytics_real(found_fix)
+                card = format_all_markets_card(league_info, home_name, away_name, match_time, analytics_full)
+                
+                btn = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fix_id}_1X2"),
+                        InlineKeyboardButton("📌 Guardar Goles", callback_data=f"save_{fix_id}_GOALS")
+                    ],
+                    [
+                        InlineKeyboardButton("📌 Guardar Doble Oportunidad", callback_data=f"save_{fix_id}_DC"),
+                        InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fix_id}_CORNERS")
+                    ]
+                ])
+                await update.message.reply_text(card, parse_mode="HTML", reply_markup=btn)
+            else:
+                await update.message.reply_text(
+                    f"❌ No se encontró ningún partido próximo que coincida con <b>'{text}'</b> en la cartelera de hoy o mañana.",
+                    parse_mode="HTML",
+                    reply_markup=get_persistent_keyboard()
+                )
+            return
+
         await update.message.reply_text(
-            "Utiliza los botones del menú inferior para interactuar con el bot.",
+            "Utiliza los botones del menú inferior para interactuar con el bot o escribe el nombre de un equipo para buscar su pronóstico.",
             reply_markup=get_persistent_keyboard()
         )
 
@@ -1070,226 +1142,4 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            dc = (await generate_fixture_analytics_real(fix))["double_chance"]
-
-            shown_count += 1
-            card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(dc["p_1x"], dc["odds_1x"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Doble Oportunidad (1X)", callback_data=f"save_{fid}_DC")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-
-    elif data.startswith("loadfixtures_catah_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        await query.message.edit_text(f"🔍 <b>Consultando Handicap Asiático ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            ah = (await generate_fixture_analytics_real(fix))["asian_handicap"]
-
-            shown_count += 1
-            card_text = format_asian_handicap_card(league_info, home, away, match_time, ah["p_ah_home"], ah["odds_ah_home"], calculate_kelly_stake(ah["p_ah_home"], ah["odds_ah_home"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Handicap Local (-0.5)", callback_data=f"save_{fid}_AH")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-
-    elif data.startswith("loadfixtures_catcorners_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            cc = (await generate_fixture_analytics_real(fix))["corners_cards"]
-            
-            if cc["odds_corners_over"] < 1.65:
-                continue
-
-            shown_count += 1
-            card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"save_{fid}_CORNERS")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-        
-        if shown_count == 0:
-            await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
-
-# ==========================================
-# ⚙️ WORKERS DE AUTO-LIQUIDACIÓN
-# ==========================================
-
-async def run_manual_settlement(query):
-    conn = get_db_connection()
-    if not conn:
-        await query.message.reply_text("⚠️ Base de datos no disponible.")
-        return
-    settled_count = 0
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
-            pending_picks = cur.fetchall()
-            if not pending_picks:
-                await query.message.reply_text("ℹ️ No hay picks pendientes para liquidar en este momento.")
-                return
-            
-            headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                for pick in pending_picks:
-                    pick_id = pick['id']
-                    fid = pick['fixture_id']
-                    market = pick['market_type']
-                    
-                    url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
-                    resp = await client.get(url, headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json().get("response", [])
-                        if data:
-                            fixture_data = data[0]
-                            status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
-                            if status_short == "FT":
-                                goals_home = fixture_data.get("goals", {}).get("home", 0)
-                                goals_away = fixture_data.get("goals", {}).get("away", 0)
-                                total_goals = goals_home + goals_away
-                                
-                                won = False
-                                if "GOALS" in market and total_goals > 2.5:
-                                    won = True
-                                elif "1X2" in market and goals_home > goals_away:
-                                    won = True
-                                elif "DOUBLE_CHANCE" in market and goals_home >= goals_away:
-                                    won = True
-                                elif "ASIAN_HANDICAP" in market and goals_home > goals_away:
-                                    won = True
-                                elif "CORNERS" in market:
-                                    won = True
-                                
-                                new_status = 'WON' if won else 'LOST'
-                                cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
-                                conn.commit()
-                                settled_count += 1
-        await query.message.reply_text(f"✅ <b>Liquidación manual finalizada:</b> Se actualizaron <code>{settled_count}</code> picks.", parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Error en liquidación manual: {e}")
-        await query.message.reply_text("❌ Ocurrió un error al procesar la liquidación manual.")
-    finally:
-        conn.close()
-
-async def auto_settlement_background_task():
-    try:
-        while True:
-            await asyncio.sleep(600)
-            conn = get_db_connection()
-            if not conn:
-                continue
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT id, fixture_id, market_type FROM user_picks WHERE status = 'PENDING';")
-                    pending_picks = cur.fetchall()
-                    if not pending_picks:
-                        continue
-                    
-                    headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        for pick in pending_picks:
-                            pick_id = pick['id']
-                            fid = pick['fixture_id']
-                            market = pick['market_type']
-                            
-                            url = f"https://{API_FOOTBALL_HOST}/fixtures?id={fid}"
-                            resp = await client.get(url, headers=headers)
-                            if resp.status_code == 200:
-                                data = resp.json().get("response", [])
-                                if data:
-                                    fixture_data = data[0]
-                                    status_short = fixture_data.get("fixture", {}).get("status", {}).get("short")
-                                    if status_short == "FT":
-                                        goals_home = fixture_data.get("goals", {}).get("home", 0)
-                                        goals_away = fixture_data.get("goals", {}).get("away", 0)
-                                        total_goals = goals_home + goals_away
-                                        
-                                        won = False
-                                        if "GOALS" in market and total_goals > 2.5:
-                                            won = True
-                                        elif "1X2" in market and goals_home > goals_away:
-                                            won = True
-                                        elif "DOUBLE_CHANCE" in market and goals_home >= goals_away:
-                                            won = True
-                                        elif "ASIAN_HANDICAP" in market and goals_home > goals_away:
-                                            won = True
-                                        elif "CORNERS" in market:
-                                            won = True
-                                        
-                                        new_status = 'WON' if won else 'LOST'
-                                        cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pick_id))
-                                        conn.commit()
-                                        logger.info(f"Pick ID {pick_id} liquidado automáticamente como: {new_status}")
-            except Exception as e:
-                logger.error(f"Error en bucle de auto-liquidación: {e}")
-            finally:
-                conn.close()
-    except asyncio.CancelledError:
-        logger.info("Tarea de auto-liquidación detenida limpiamente.")
-
-async def post_init(application: Application):
-    init_db()
-    asyncio.create_task(auto_settlement_background_task())
-
-def main():
-    if not TELEGRAM_TOKEN:
-        logger.error("¡ERROR CRÍTICO! La variable de entorno TELEGRAM_TOKEN no está configurada.")
-        return
-
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CallbackQueryHandler(callback_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
-
-    logger.info("Iniciando bot con menú de fechas dinámico (hoy, mañana, pasado mañana)...")
-    application.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+            league_info = f"{league.
