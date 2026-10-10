@@ -587,35 +587,48 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
             
     elif "Top Value +EV" in text:
-        await update.message.reply_text("🎯 Buscando la oportunidad con mayor valor esperado (`+EV`) en los partidos de hoy...", reply_markup=get_persistent_keyboard())
+        await update.message.reply_text("🎯 Buscando la oportunidad con mayor valor esperado (`+EV`) entre todos los mercados disponibles...", reply_markup=get_persistent_keyboard())
         try:
             fixtures_data = await fetch_fixtures_from_api(today_str)
             best_pick = None
             max_ev = -999
             
-            for fix in fixtures_data[:10]:
+            for fix in fixtures_data[:12]:
                 analysis = await generate_fixture_analytics_real(fix)
                 h_name = fix.get("teams", {}).get("home", {}).get("name", "Local")
                 a_name = fix.get("teams", {}).get("away", {}).get("name", "Visita")
                 league_name = fix.get("league", {}).get("name", "Liga")
                 match_time = format_match_time(fix)
                 
-                p_over = analysis["goals"]["p_over_25"]
-                odds_over = analysis["goals"]["odds_over"]
-                ev_val = (p_over * odds_over) - 1
+                # Recopilamos todos los mercados posibles y sus datos
+                markets_to_check = [
+                    {"name": "Victoria Local (1X2)", "prob": analysis["market_1x2"]["p_home"], "odds": analysis["market_1x2"]["odds_home"], "short": "1X2"},
+                    {"name": "Victoria Visitante (1X2)", "prob": analysis["market_1x2"]["p_away"], "odds": analysis["market_1x2"]["odds_away"], "short": "1X2"},
+                    {"name": "Más de 2.5 Goles", "prob": analysis["goals"]["p_over_25"], "odds": analysis["goals"]["odds_over"], "short": "GOALS"},
+                    {"name": "Ambos Anotan (BTTS)", "prob": analysis["goals"]["p_btts_yes"], "odds": analysis["goals"]["odds_btts_yes"], "short": "GOALS"},
+                    {"name": "Doble Oportunidad (1X)", "prob": analysis["double_chance"]["p_1x"], "odds": analysis["double_chance"]["odds_1x"], "short": "DC"},
+                    {"name": "Doble Oportunidad (X2)", "prob": analysis["double_chance"]["p_x2"], "odds": analysis["double_chance"]["odds_x2"], "short": "DC"},
+                    {"name": "Handicap Asiático (-0.5)", "prob": analysis["asian_handicap"]["p_ah_home"], "odds": analysis["asian_handicap"]["odds_ah_home"], "short": "AH"},
+                    {"name": "Más de 8.5 Córners", "prob": analysis["corners_cards"]["p_corners"], "odds": analysis["corners_cards"]["odds_corners_over"], "short": "CORNERS"}
+                ]
                 
-                if ev_val > max_ev:
-                    max_ev = ev_val
-                    best_pick = {
-                        "match": f"{h_name} vs {a_name}",
-                        "league": league_name,
-                        "time": match_time,
-                        "market": "Más de 2.5 Goles",
-                        "prob": p_over,
-                        "odds": odds_over,
-                        "ev": ev_val,
-                        "stake": calculate_kelly_stake(p_over, odds_over)
-                    }
+                for m in markets_to_check:
+                    p = m["prob"]
+                    odds = m["odds"]
+                    ev_val = (p * odds) - 1
+                    
+                    if ev_val > max_ev:
+                        max_ev = ev_val
+                        best_pick = {
+                            "match": f"{h_name} vs {a_name}",
+                            "league": league_name,
+                            "time": match_time,
+                            "market": m["name"],
+                            "prob": p,
+                            "odds": odds,
+                            "ev": ev_val,
+                            "stake": calculate_kelly_stake(p, odds)
+                        }
             
             if best_pick and max_ev > 0:
                 text_out = (
@@ -631,7 +644,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=get_persistent_keyboard())
             else:
-                await update.message.reply_text("⚠️ No se encontró una apuesta con EV positivo claro en este momento.", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text("⚠️ No se encontró ninguna apuesta con EV positivo claro en este momento.", reply_markup=get_persistent_keyboard())
         except Exception as e:
             logger.error(f"Error en Top Value: {e}")
             await update.message.reply_text("❌ Ocurrió un error al calcular el Top Value.", reply_markup=get_persistent_keyboard())
