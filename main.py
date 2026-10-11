@@ -82,9 +82,11 @@ def init_db():
                     telegram_id BIGINT PRIMARY KEY,
                     username VARCHAR(100),
                     role VARCHAR(20) DEFAULT 'user',
+                    is_vip BOOLEAN DEFAULT FALSE,
                     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_vip BOOLEAN DEFAULT FALSE;")
             conn.commit()
             logger.info("Base de datos y tablas inicializadas correctamente.")
     except Exception as e:
@@ -111,23 +113,46 @@ async def register_user_middleware(update: Update):
         finally:
             conn.close()
 
+def check_user_vip_status(telegram_id: int) -> bool:
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT role, is_vip FROM bot_users WHERE telegram_id = %s;", (telegram_id,))
+            res = cur.fetchone()
+            if res and (res['role'] == 'admin' or res.get('is_vip', False)):
+                return True
+    except Exception as e:
+        logger.error(f"Error verificando estado VIP: {e}")
+    finally:
+        conn.close()
+    return False
+
 # ==========================================
-# ⌨️ TECLADO INFERIOR (REPLY KEYBOARD LIMPIO)
+# ⌨️ TECLADOS SEGÚN RANGO (VIP vs FREE)
 # ==========================================
 
-def get_persistent_keyboard():
-    keyboard = [
-        [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
-        [KeyboardButton("🛡️ Doble Oportunidad"), KeyboardButton("⚖️ Handicap Asiático")],
-        [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🍀 Combinadas EV+")],
-        [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("🎯 Top Value +EV")],
-        [KeyboardButton("💎 Suscripción VIP"), KeyboardButton("📖 Ayuda")],
-        [KeyboardButton("⚙️ Panel Admin")]
-    ]
+def get_keyboard_for_user(telegram_id: int):
+    is_vip = check_user_vip_status(telegram_id)
+    if is_vip:
+        keyboard = [
+            [KeyboardButton("⚽ 1X2 / Ganador"), KeyboardButton("⚽ Goles & BTTS")],
+            [KeyboardButton("🛡️ Doble Oportunidad"), KeyboardButton("⚖️ Handicap Asiático")],
+            [KeyboardButton("🚩 Córners & Tarjetas"), KeyboardButton("🍀 Combinadas EV+")],
+            [KeyboardButton("📊 Mis Estadísticas"), KeyboardButton("🎯 Top Value +EV")],
+            [KeyboardButton("💎 Suscripción VIP"), KeyboardButton("📖 Ayuda")],
+            [KeyboardButton("⚙️ Panel Admin")]
+        ]
+    else:
+        keyboard = [
+            [KeyboardButton("💎 Suscripción VIP"), KeyboardButton("📖 Ayuda")],
+            [KeyboardButton("📊 Estadísticas Globales")]
+        ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ==========================================
-# 📅 GENERADOR DE TECLADO DE FECHAS (HOY, MAÑANA, PASADO)
+# 📅 GENERADOR DE TECLADO DE FECHAS
 # ==========================================
 
 def get_fecha_selector_keyboard(prefix: str):
@@ -481,11 +506,19 @@ def calculate_kelly_stake(probability, odds):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_middleware(update)
+    user_id = update.effective_user.id
+    is_vip = check_user_vip_status(user_id)
+    
     if update.message:
+        welcome_text = (
+            "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\n"
+            "Sistema avanzado de predicción y análisis matemático deportivo basado en modelos de Poisson y gestión de bankroll.\n\n"
+            "👇 <i>Utiliza los botones del menú inferior para explorar:</i>"
+        )
         await update.message.reply_text(
-            "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\nUtiliza el menú inferior para seleccionar el mercado de apuestas o escribe directamente el nombre de cualquier equipo para buscar su pronóstico:",
+            welcome_text,
             parse_mode="HTML",
-            reply_markup=get_persistent_keyboard()
+            reply_markup=get_keyboard_for_user(user_id)
         )
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -493,12 +526,87 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
         
     await register_user_middleware(update)
+    user_id = update.effective_user.id
     text = update.message.text.strip()
-    logger.info(f"Mensaje recibido de Telegram: '{text}'")
+    is_vip = check_user_vip_status(user_id)
     
     tz_uy = timezone(timedelta(hours=-3))
     today_str = datetime.now(tz_uy).strftime("%Y-%m-%d")
-    
+
+    # Botones permitidos para usuarios FREE
+    if text == "💎 Suscripción VIP":
+        paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
+        vip_text = (
+            "💎 <b>ACCESO COMPLETO & SUSCRIPCIÓN VIP</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Desbloquea todo el potencial de <b>NosticProno</b> y lleva tus análisis deportivos al siguiente nivel:\n\n"
+            "• 📊 Escaneo ilimitado de Top Value (+EV).\n"
+            "• 🤖 Modelos de Poisson avanzados en todos los mercados.\n"
+            "• 💰 Cálculo automático de Bankroll con Criterio de Kelly.\n"
+            "• 📈 Historial y estadísticas avanzadas de rendimiento.\n\n"
+            "💵 <b>Inversión:</b> <code>$15.00 USD / mes</code>\n\n"
+            "👉 <b>Haz clic en el siguiente botón para realizar tu pago seguro a través de PayPal:</b>"
+        )
+        pay_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Pagar $15.00 USD con PayPal", url=paypal_link)],
+            [InlineKeyboardButton("📤 Ya realicé el pago (Enviar comprobante)", callback_data="vip_payment_sent")]
+        ])
+        await update.message.reply_text(vip_text, parse_mode="HTML", reply_markup=pay_keyboard)
+        return
+
+    elif text == "📖 Ayuda":
+        help_text = (
+            "📖 <b>GUÍA DE USO & INFORMACIÓN</b>\n\n"
+            "• 🤖 <b>NosticProno</b> utiliza algoritmos de probabilidad de Poisson y el Criterio de Kelly para detectar apuestas con valor esperado positivo (+EV).\n"
+            "• 💎 <b>Suscripción VIP:</b> Desbloquea cuotas en tiempo real, escáner de valor y todos los mercados diarios.\n\n"
+            "💡 <i>Suscríbete desde el botón del menú inferior para acceder a la plataforma completa.</i>"
+        )
+        await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_keyboard_for_user(user_id))
+        return
+
+    elif text == "📊 Estadísticas Globales":
+        conn = get_db_connection()
+        total = 0
+        wins = 0
+        hit_rate = 0
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE status IN ('WON', 'LOST');")
+                    res = cur.fetchone()
+                    total = res['total'] or 0
+                    wins = res['wins'] or 0
+                    hit_rate = (wins / total * 100) if total > 0 else 0
+            except Exception as e:
+                logger.error(f"Error consultando estadísticas globales: {e}")
+            finally:
+                conn.close()
+        
+        await update.message.reply_text(
+            f"📊 <b>RENDIMIENTO GLOBAL DEL SISTEMA</b>\n\n"
+            f"• Total de Picks Registrados: <code>{total}</code>\n"
+            f"• Tasa de Acierto Histórica: <code>{hit_rate:.1f}%</code>\n\n"
+            f"💎 <i>Adquiere tu Suscripción VIP para ver el desglose detallado de cada partido.</i>",
+            parse_mode="HTML",
+            reply_markup=get_keyboard_for_user(user_id)
+        )
+        return
+
+    # Bloqueo para usuarios FREE que intenten acceder a funciones analíticas
+    restricted_triggers = ["1X2 / Ganador", "Goles & BTTS", "Doble Oportunidad", "Handicap Asiático", "Córners & Tarjetas", "Combinadas EV+", "Mis Estadísticas", "Top Value +EV", "Panel Admin"]
+    if not is_vip and (any(rt in text for rt in restricted_triggers) or len(text) > 2):
+        paywall_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 Obtener Acceso VIP ($15/mes)", callback_data="go_to_vip_menu")]
+        ])
+        await update.message.reply_text(
+            "🔒 <b>CONTENIDO EXCLUSIVO PARA MIEMBROS VIP</b>\n\n"
+            "La exploración gratuita solo permite ver el menú principal y la ayuda. Para consultar pronósticos detallados, buscadores de equipos y modelos +EV, adquiere tu membresía mensual:",
+            parse_mode="HTML",
+            reply_markup=paywall_kb
+        )
+        return
+
+    # Si es VIP, procesamos sus solicitudes normales de menús de análisis
     if "Goles & BTTS" in text:
         await update.message.reply_text(
             "🗓️ <b>Selecciona el rango de fecha para Goles & BTTS:</b>",
@@ -581,14 +689,12 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
             except Exception as e:
                 logger.error(f"Error generando estadísticas avanzadas: {e}")
-                await update.message.reply_text("❌ Error al consultar las estadísticas.", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text("❌ Error al consultar las estadísticas.", reply_markup=get_keyboard_for_user(user_id))
             finally:
                 conn.close()
-        else:
-            await update.message.reply_text("📊 Base de datos no conectada.", reply_markup=get_persistent_keyboard())
             
     elif "Top Value +EV" in text:
-        await update.message.reply_text("🎯 Buscando la oportunidad con mayor valor esperado (`+EV`) entre todos los mercados disponibles...", reply_markup=get_persistent_keyboard())
+        await update.message.reply_text("🎯 Buscando la oportunidad con mayor valor esperado (`+EV`) entre todos los mercados disponibles...", reply_markup=get_keyboard_for_user(user_id))
         try:
             fixtures_data = await fetch_fixtures_from_api(today_str)
             best_pick = None
@@ -642,15 +748,15 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"💰 **Stake Recomendado (Kelly):** `{best_pick['stake']}%`\n"
                     f"━━━━━━━━━━━━━━━━━━━"
                 )
-                await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=get_keyboard_for_user(user_id))
             else:
-                await update.message.reply_text("⚠️ No se encontró ninguna apuesta con EV positivo claro en este momento.", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text("⚠️ No se encontró ninguna apuesta con EV positivo claro en este momento.", reply_markup=get_keyboard_for_user(user_id))
         except Exception as e:
             logger.error(f"Error en Top Value: {e}")
-            await update.message.reply_text("❌ Ocurrió un error al calcular el Top Value.", reply_markup=get_persistent_keyboard())
+            await update.message.reply_text("❌ Ocurrió un error al calcular el Top Value.", reply_markup=get_keyboard_for_user(user_id))
 
     elif "Combinada" in text or "EV+" in text:
-        await update.message.reply_text("🍀 Generando combinada inteligente con valor esperado positivo (`+EV`) para hoy...", reply_markup=get_persistent_keyboard())
+        await update.message.reply_text("🍀 Generando combinada inteligente con valor esperado positivo (`+EV`) para hoy...", reply_markup=get_keyboard_for_user(user_id))
         try:
             fixtures_data = await fetch_fixtures_from_api(today_str)
             valid_picks = []
@@ -690,31 +796,12 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"💰 <b>Stake Sugerido (Conservador):</b> <code>0.5% - 1%</code>\n"
                     f"━━━━━━━━━━━━━━━━━━━"
                 )
-                await update.message.reply_text(combinada_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text(combinada_text, parse_mode="HTML", reply_markup=get_keyboard_for_user(user_id))
             else:
-                await update.message.reply_text("⚠ No hay suficientes partidos con EV positivo para armar una combinada segura hoy.", reply_markup=get_persistent_keyboard())
+                await update.message.reply_text("⚠ No hay suficientes partidos con EV positivo para armar una combinada segura hoy.", reply_markup=get_keyboard_for_user(user_id))
         except Exception as e:
             logger.error(f"Error generando combinada: {e}")
-            await update.message.reply_text("❌ Ocurrió un error al armar la combinada.", reply_markup=get_persistent_keyboard())
-
-    elif "Suscripción VIP" in text:
-        paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
-        vip_text = (
-            "💎 <b>ACCESO COMPLETO & SUSCRIPCIÓN VIP</b>\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            "Desbloquea todo el potencial de <b>NosticProno</b> y lleva tus análisis deportivos al siguiente nivel:\n\n"
-            "• 📊 Escaneo ilimitado de Top Value (+EV).\n"
-            "• 🤖 Modelos de Poisson avanzados en todos los mercados.\n"
-            "• 💰 Cálculo automático de Bankroll con Criterio de Kelly.\n"
-            "• 📈 Historial y estadísticas avanzadas de rendimiento.\n\n"
-            "💵 <b>Inversión:</b> <code>$15.00 USD / mes</code>\n\n"
-            "👉 <b>Haz clic en el siguiente botón para realizar tu pago seguro a través de PayPal:</b>"
-        )
-        pay_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Pagar $15.00 USD con PayPal", url=paypal_link)],
-            [InlineKeyboardButton("📤 Ya realicé el pago (Enviar comprobante)", callback_data="vip_payment_sent")]
-        ])
-        await update.message.reply_text(vip_text, parse_mode="HTML", reply_markup=pay_keyboard)
+            await update.message.reply_text("❌ Ocurrió un error al armar la combinada.", reply_markup=get_keyboard_for_user(user_id))
 
     elif "Panel Admin" in text:
         conn = get_db_connection()
@@ -767,76 +854,34 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await update.message.reply_text(admin_text, parse_mode="HTML", reply_markup=admin_keyboard)
 
-    elif "Ayuda" in text:
-        help_text = (
-            "📖 <b>GUÍA DE USO & NUEVOS MERCADOS</b>\n\n"
-            "• ⚽ <b>1X2, Goles & Doble Oportunidad:</b> Analiza partidos con modelos Poisson mejorados.\n"
-            "• ⚖️ <b>Handicap Asiático:</b> Apuestas de valor con cobertura de empate (-0.5).\n"
-            "• 📊 <b>Mis Estadísticas:</b> Visualiza tus aciertos, gestiona o modifica tus selecciones guardadas.\n"
-            "• 🔍 <b>Búsqueda Manual:</b> Escribe el nombre de cualquier equipo en el chat para obtener un reporte completo con todas las opciones viables.\n\n"
-            "💡 <i>Usa los botones del teclado inferior para explorar todos los mercados disponibles en tiempo real.</i>"
-        )
-        await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_persistent_keyboard())
-        
-    else:
-        if len(text) > 2 and not text.startswith("/"):
-            await update.message.reply_text(f"🔍 Buscando opciones viables para: <b>{text}</b>...", parse_mode="HTML")
-            
-            tomorrow_str = (datetime.now(tz_uy) + timedelta(days=1)).strftime("%Y-%m-%d")
-            fixtures = await fetch_fixtures_from_api(today_str) + await fetch_fixtures_from_api(tomorrow_str)
-            found_fix = None
-            
-            search_query = text.lower()
-            for fix in fixtures:
-                home = fix.get("teams", {}).get("home", {}).get("name", "").lower()
-                away = fix.get("teams", {}).get("away", {}).get("name", "").lower()
-                if search_query in home or search_query in away:
-                    found_fix = fix
-                    break
-                    
-            if found_fix:
-                fix_id = found_fix.get("fixture", {}).get("id", 0)
-                league = found_fix.get("league", {})
-                league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-                home_name = found_fix.get("teams", {}).get("home", {}).get("name", "Local")
-                away_name = found_fix.get("teams", {}).get("away", {}).get("name", "Visitante")
-                match_time = format_match_time(found_fix)
-                
-                analytics_full = await generate_fixture_analytics_real(found_fix)
-                card = format_all_markets_card(league_info, home_name, away_name, match_time, analytics_full)
-                
-                btn = InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fix_id}_1X2"),
-                        InlineKeyboardButton("📌 Guardar Goles", callback_data=f"save_{fix_id}_GOALS")
-                    ],
-                    [
-                        InlineKeyboardButton("📌 Guardar Doble Oportunidad", callback_data=f"save_{fix_id}_DC"),
-                        InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fix_id}_CORNERS")
-                    ]
-                ])
-                await update.message.reply_text(card, parse_mode="HTML", reply_markup=btn)
-            else:
-                await update.message.reply_text(
-                    f"❌ No se encontró ningún partido próximo que coincida con <b>'{text}'</b> en la cartelera de hoy o mañana.",
-                    parse_mode="HTML",
-                    reply_markup=get_persistent_keyboard()
-                )
-            return
-
-        await update.message.reply_text(
-            "Utiliza los botones del menú inferior para interactuar con el bot o escribe el nombre de un equipo para buscar su pronóstico.",
-            reply_markup=get_persistent_keyboard()
-        )
-
 # ==========================================
-# 🎛️ MANEJADOR DE CALLBACKS (INTERACTIVIDAD TOTAL)
+# 🎛️ MANEJADOR DE CALLBACKS
 # ==========================================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    if data in ["go_to_vip", "go_to_vip_menu"]:
+        paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
+        vip_text = (
+            "💎 <b>ACCESO COMPLETO & SUSCRIPCIÓN VIP</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Desbloquea todo el potencial de <b>NosticProno</b> y lleva tus análisis deportivos al siguiente nivel:\n\n"
+            "• 📊 Escaneo ilimitado de Top Value (+EV).\n"
+            "• 🤖 Modelos de Poisson avanzados en todos los mercados.\n"
+            "• 💰 Cálculo automático de Bankroll con Criterio de Kelly.\n"
+            "• 📈 Historial y estadísticas avanzadas de rendimiento.\n\n"
+            "💵 <b>Inversión:</b> <code>$15.00 USD / mes</code>\n\n"
+            "👉 <b>Haz clic en el siguiente botón para realizar tu pago seguro a través de PayPal:</b>"
+        )
+        pay_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Pagar $15.00 USD con PayPal", url=paypal_link)],
+            [InlineKeyboardButton("📤 Ya realicé el pago (Enviar comprobante)", callback_data="vip_payment_sent")]
+        ])
+        await query.message.reply_text(vip_text, parse_mode="HTML", reply_markup=pay_keyboard)
+        return
 
     if data == "vip_payment_sent":
         await query.answer("¡Gracias! Verificaremos tu comprobante a la brevedad.", show_alert=True)
@@ -978,27 +1023,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=user_menu_kb
         )
 
-    elif data == "admin_add_user":
-        await query.message.edit_text(
-            "➕ <b>Agregar Usuario</b>\nEnvía el ID de Telegram y el alias del nuevo usuario que deseas registrar en el sistema.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_manage_users")]])
-        )
-
-    elif data == "admin_modify_user":
-        await query.message.edit_text(
-            "✏ <b>Modificar Usuario</b>\nSelecciona el usuario que deseas modificar o actualiza sus permisos/datos.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_manage_users")]])
-        )
-
-    elif data == "admin_delete_user_prompt":
-        await query.message.edit_text(
-            "🗑️ <b>Eliminar Usuario</b>\nSelecciona el usuario que deseas remover de la base de datos.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Volver", callback_data="admin_manage_users")]])
-        )
-
     elif data == "admin_list_users":
         conn = get_db_connection()
         if not conn:
@@ -1006,7 +1030,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT telegram_id, username, role FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
+                cur.execute("SELECT telegram_id, username, role, is_vip FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
                 users = cur.fetchall()
                 if not users:
                     await query.message.reply_text("📭 No hay usuarios registrados en el sistema.")
@@ -1015,16 +1039,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     uid = u['telegram_id']
                     uname = u['username'] or "Sin Alias"
                     role = u['role']
+                    is_vip_val = u['is_vip']
                     
                     user_kb = InlineKeyboardMarkup([
                         [
-                            InlineKeyboardButton("⭐ Cambiar Rol", callback_data=f"user_role_{uid}"),
+                            InlineKeyboardButton("💎 Alternar VIP", callback_data=f"user_vip_{uid}"),
                             InlineKeyboardButton("🗑️ Eliminar", callback_data=f"user_del_{uid}")
                         ],
                         [InlineKeyboardButton("🔙 Volver a Gestión", callback_data="admin_manage_users")]
                     ])
                     await query.message.reply_text(
-                        f"👤 <b>Usuario:</b> {uname}\n• ID: <code>{uid}</code>\n• Rol actual: <code>{role}</code>",
+                        f"👤 <b>Usuario:</b> {uname}\n• ID: <code>{uid}</code>\n• Rol: <code>{role}</code> | VIP: <code>{is_vip_val}</code>",
                         parse_mode="HTML", reply_markup=user_kb
                     )
         except Exception as e:
@@ -1033,24 +1058,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             conn.close()
 
-    elif data.startswith("user_role_"):
+    elif data.startswith("user_vip_"):
         uid = int(data.split("_")[2])
         conn = get_db_connection()
         if conn:
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT role FROM bot_users WHERE telegram_id = %s", (uid,))
+                    cur.execute("SELECT is_vip FROM bot_users WHERE telegram_id = %s", (uid,))
                     res = cur.fetchone()
                     if res:
-                        current_role = res['role']
-                        new_role = "admin" if current_role == "user" else "user"
-                        cur.execute("UPDATE bot_users SET role = %s WHERE telegram_id = %s", (new_role, uid))
+                        new_vip_status = not res['is_vip']
+                        cur.execute("UPDATE bot_users SET is_vip = %s WHERE telegram_id = %s", (new_vip_status, uid))
                         conn.commit()
-                        await query.answer(f"✅ Rol cambiado a {new_role}", show_alert=True)
-                        await query.message.edit_text(f"⭐ <b>El rol del usuario ID {uid} ha sido actualizado a:</b> <code>{new_role}</code>", parse_mode="HTML")
+                        await query.answer(f"✅ Estado VIP actualizado a {new_vip_status}", show_alert=True)
+                        await query.message.edit_text(f"💎 <b>El usuario ID {uid} ahora tiene estatus VIP:</b> <code>{new_vip_status}</code>", parse_mode="HTML")
             except Exception as e:
-                logger.error(f"Error cambiando rol de usuario {uid}: {e}")
-                await query.answer("❌ Error al cambiar el rol.", show_alert=True)
+                logger.error(f"Error cambiando VIP de usuario {uid}: {e}")
+                await query.answer("❌ Error al cambiar VIP.", show_alert=True)
             finally:
                 conn.close()
 
@@ -1395,7 +1419,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con Top Value global en todos los mercados...")
+    logger.info("Iniciando bot con restricción de acceso VIP...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
