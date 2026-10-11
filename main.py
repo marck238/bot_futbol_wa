@@ -698,7 +698,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ Ocurrió un error al armar la combinada.", reply_markup=get_persistent_keyboard())
 
     elif "Suscripción VIP" in text:
-        paypal_link = "https://paypal.me/NosticProno/10USD"
+        paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
         vip_text = (
             "💎 <b>ACCESO COMPLETO & SUSCRIPCIÓN VIP</b>\n"
             "━━━━━━━━━━━━━━━━━━━\n"
@@ -707,11 +707,11 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "• 🤖 Modelos de Poisson avanzados en todos los mercados.\n"
             "• 💰 Cálculo automático de Bankroll con Criterio de Kelly.\n"
             "• 📈 Historial y estadísticas avanzadas de rendimiento.\n\n"
-            "💵 <b>Inversión:</b> <code>$10.00 USD / mes</code>\n\n"
+            "💵 <b>Inversión:</b> <code>$15.00 USD / mes</code>\n\n"
             "👉 <b>Haz clic en el siguiente botón para realizar tu pago seguro a través de PayPal:</b>"
         )
         pay_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Pagar $10.00 USD con PayPal", url=paypal_link)],
+            [InlineKeyboardButton("💳 Pagar $15.00 USD con PayPal", url=paypal_link)],
             [InlineKeyboardButton("📤 Ya realicé el pago (Enviar comprobante)", callback_data="vip_payment_sent")]
         ])
         await update.message.reply_text(vip_text, parse_mode="HTML", reply_markup=pay_keyboard)
