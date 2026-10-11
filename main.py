@@ -83,10 +83,14 @@ def init_db():
                     username VARCHAR(100),
                     role VARCHAR(20) DEFAULT 'user',
                     is_vip BOOLEAN DEFAULT FALSE,
+                    expires_at TIMESTAMP,
+                    renewal_warned BOOLEAN DEFAULT FALSE,
                     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_vip BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;")
+            cur.execute("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS renewal_warned BOOLEAN DEFAULT FALSE;")
             conn.commit()
             logger.info("Base de datos y tablas inicializadas correctamente.")
     except Exception as e:
@@ -1030,7 +1034,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT telegram_id, username, role, is_vip FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
+                cur.execute("SELECT telegram_id, username, role, is_vip, expires_at FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
                 users = cur.fetchall()
                 if not users:
                     await query.message.reply_text("📭 No hay usuarios registrados en el sistema.")
@@ -1040,6 +1044,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     uname = u['username'] or "Sin Alias"
                     role = u['role']
                     is_vip_val = u['is_vip']
+                    exp_val = u['expires_at'].strftime("%d/%m/%Y") if u['expires_at'] else "N/A"
                     
                     user_kb = InlineKeyboardMarkup([
                         [
@@ -1049,7 +1054,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         [InlineKeyboardButton("🔙 Volver a Gestión", callback_data="admin_manage_users")]
                     ])
                     await query.message.reply_text(
-                        f"👤 <b>Usuario:</b> {uname}\n• ID: <code>{uid}</code>\n• Rol: <code>{role}</code> | VIP: <code>{is_vip_val}</code>",
+                        f"👤 <b>Usuario:</b> {uname}\n• ID: <code>{uid}</code>\n• Rol: <code>{role}</code> | VIP: <code>{is_vip_val}</code>\n• Expira: <code>{exp_val}</code>",
                         parse_mode="HTML", reply_markup=user_kb
                     )
         except Exception as e:
@@ -1068,10 +1073,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res = cur.fetchone()
                     if res:
                         new_vip_status = not res['is_vip']
-                        cur.execute("UPDATE bot_users SET is_vip = %s WHERE telegram_id = %s", (new_vip_status, uid))
+                        tz_uy = timezone(timedelta(hours=-3))
+                        if new_vip_status:
+                            expires_at = datetime.now(tz_uy) + timedelta(days=30)
+                            cur.execute("UPDATE bot_users SET is_vip = TRUE, expires_at = %s, renewal_warned = FALSE WHERE telegram_id = %s", (expires_at, uid))
+                        else:
+                            cur.execute("UPDATE bot_users SET is_vip = FALSE, expires_at = NULL, renewal_warned = FALSE WHERE telegram_id = %s", (uid,))
                         conn.commit()
                         await query.answer(f"✅ Estado VIP actualizado a {new_vip_status}", show_alert=True)
-                        await query.message.edit_text(f"💎 <b>El usuario ID {uid} ahora tiene estatus VIP:</b> <code>{new_vip_status}</code>", parse_mode="HTML")
+                        exp_msg = f" (Expira en 30 días)" if new_vip_status else ""
+                        await query.message.edit_text(f"💎 <b>El usuario ID {uid} ahora tiene estatus VIP:</b> <code>{new_vip_status}</code>{exp_msg}", parse_mode="HTML")
             except Exception as e:
                 logger.error(f"Error cambiando VIP de usuario {uid}: {e}")
                 await query.answer("❌ Error al cambiar VIP.", show_alert=True)
@@ -1282,7 +1293,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
 
 # ==========================================
-# ⚙️ WORKERS DE AUTO-LIQUIDACIÓN
+# ⚙️ WORKERS DE AUTO-LIQUIDACIÓN Y SUSCRIPCIÓN
 # ==========================================
 
 async def run_manual_settlement(query):
@@ -1397,9 +1408,72 @@ async def auto_settlement_background_task():
     except asyncio.CancelledError:
         logger.info("Tarea de auto-liquidación detenida limpiamente.")
 
+async def background_subscription_checker(application):
+    try:
+        while True:
+            await asyncio.sleep(3600)  # Revisa cada 1 hora
+            conn = get_db_connection()
+            if not conn:
+                continue
+            try:
+                tz_uy = timezone(timedelta(hours=-3))
+                now = datetime.now(tz_uy)
+                warning_threshold = now + timedelta(days=2)  # Faltan 2 días o menos
+
+                with conn.cursor() as cur:
+                    # 1. Enviar aviso de proximidad de expiración
+                    cur.execute(
+                        """
+                        SELECT telegram_id, expires_at FROM bot_users 
+                        WHERE is_vip = TRUE AND expires_at IS NOT NULL 
+                          AND expires_at <= %s AND expires_at > %s 
+                          AND (renewal_warned IS FALSE OR renewal_warned IS NULL);
+                        """,
+                        (warning_threshold, now)
+                    )
+                    users_to_warn = cur.fetchall()
+                    
+                    for u in users_to_warn:
+                        uid = u['telegram_id']
+                        exp_date = u['expires_at'].strftime("%d/%m/%Y a las %H:%M")
+                        warn_text = (
+                            "⚠️ <b>¡Tu Suscripción VIP está por expirar!</b>\n\n"
+                            f"Tu membresía caducará el próximo <code>{exp_date}</code>.\n\n"
+                            "Para evitar interrupciones en tus pronósticos, escaneos +EV y modelos de Poisson, puedes renovar tu acceso mensual ($15 USD) haciendo clic abajo:"
+                        )
+                        renewal_kb = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("💳 Renovar Suscripción ($15 USD)", url="https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U")],
+                            [InlineKeyboardButton("📤 Enviar Comprobante de Renovación", callback_data="vip_payment_sent")]
+                        ])
+                        try:
+                            await application.bot.send_message(chat_id=uid, text=warn_text, parse_mode="HTML", reply_markup=renewal_kb)
+                            cur.execute("UPDATE bot_users SET renewal_warned = TRUE WHERE telegram_id = %s;", (uid,))
+                            conn.commit()
+                        except Exception as ex:
+                            logger.error(f"No se pudo enviar aviso de expiración a {uid}: {ex}")
+
+                    # 2. Expirar cuentas vencidas
+                    cur.execute(
+                        """
+                        UPDATE bot_users 
+                        SET is_vip = FALSE, renewal_warned = FALSE 
+                        WHERE is_vip = TRUE AND expires_at IS NOT NULL AND expires_at < %s;
+                        """,
+                        (now,)
+                    )
+                    conn.commit()
+
+            except Exception as e:
+                logger.error(f"Error en la tarea de verificación de suscripciones: {e}")
+            finally:
+                conn.close()
+    except asyncio.CancelledError:
+        pass
+
 async def post_init(application: Application):
     init_db()
     asyncio.create_task(auto_settlement_background_task())
+    asyncio.create_task(background_subscription_checker(application))
 
 def main():
     if not TELEGRAM_TOKEN:
@@ -1419,7 +1493,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con restricción de acceso VIP...")
+    logger.info("Iniciando bot con restricción de acceso VIP y control de 30 días...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
