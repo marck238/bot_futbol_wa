@@ -516,6 +516,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_keyboard_for_user(user_id)
         )
 
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    admin_id = os.getenv("ADMIN_TELEGRAM_ID", "1588200613")
+    
+    if update.message and update.message.photo and admin_id:
+        caption = (
+            f"📥 <b>Nuevo Comprobante Recibido</b>\n\n"
+            f"• <b>De:</b> {user.first_name} (@{user.username or 'Sin alias'})\n"
+            f"• <b>ID:</b> <code>{user.id}</code>"
+        )
+        try:
+            await context.bot.send_photo(
+                chat_id=int(admin_id),
+                photo=update.message.photo[-1].file_id,
+                caption=caption,
+                parse_mode="HTML"
+            )
+            await update.message.reply_text(
+                "✅ ¡Comprobante recibido y enviado al administrador para su revisión!"
+            )
+        except Exception as e:
+            logger.error(f"Error al reenviar comprobante al admin: {e}")
+
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -1523,8 +1546,9 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con filtro de horas y control de 30 días...")
+    logger.info("Iniciando bot con reenvío automático de comprobantes al admin...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
