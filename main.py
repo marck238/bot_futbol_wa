@@ -156,7 +156,7 @@ def get_keyboard_for_user(telegram_id: int):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ==========================================
-# 📅 GENERADOR DE TECLADO DE FECHAS
+# 📅 GENERADOR DE TECLADO DE FECHAS Y HORAS
 # ==========================================
 
 def get_fecha_selector_keyboard(prefix: str):
@@ -166,9 +166,21 @@ def get_fecha_selector_keyboard(prefix: str):
     pasado = hoy + timedelta(days=2)
     
     keyboard = [
-        [InlineKeyboardButton("📅 Partidos de hoy", callback_data=f"loadfixtures_{prefix}_{hoy.strftime('%Y-%m-%d')}")],
-        [InlineKeyboardButton("📅 Partidos de mañana", callback_data=f"loadfixtures_{prefix}_{mañana.strftime('%Y-%m-%d')}")],
-        [InlineKeyboardButton("📅 Partidos de pasado mañana", callback_data=f"loadfixtures_{prefix}_{pasado.strftime('%Y-%m-%d')}")]
+        [InlineKeyboardButton("📅 Partidos de hoy", callback_data=f"timeframe_{prefix}")],
+        [InlineKeyboardButton("📅 Partidos de mañana", callback_data=f"loadfixtures_{prefix}_{mañana.strftime('%Y-%m-%d')}_all")],
+        [InlineKeyboardButton("📅 Partidos de pasado mañana", callback_data=f"loadfixtures_{prefix}_{pasado.strftime('%Y-%m-%d')}_all")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_timeframe_keyboard(prefix: str):
+    tz = timezone(timedelta(hours=-3))
+    hoy_str = datetime.now(tz).strftime('%Y-%m-%d')
+    
+    keyboard = [
+        [InlineKeyboardButton("⚡ Próximas 3 horas", callback_data=f"loadfixtures_{prefix}_{hoy_str}_3h")],
+        [InlineKeyboardButton("⏳ Próximas 6 horas", callback_data=f"loadfixtures_{prefix}_{hoy_str}_6h")],
+        [InlineKeyboardButton("🕒 Próximas 12 horas", callback_data=f"loadfixtures_{prefix}_{hoy_str}_12h")],
+        [InlineKeyboardButton("📅 Todos los partidos de hoy", callback_data=f"loadfixtures_{prefix}_{hoy_str}_all")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -280,31 +292,6 @@ def format_corners_cards(league_info, home, away, match_time, avg_corners, odds_
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
-def format_all_markets_card(league_info, home, away, match_time, analytics):
-    m_1x2 = analytics["market_1x2"]
-    goals = analytics["goals"]
-    dc = analytics["double_chance"]
-    ah = analytics["asian_handicap"]
-    cc = analytics["corners_cards"]
-
-    return (
-        f"⚽ <b>{home} vs {away}</b>\n"
-        f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>RESUMEN DE OPCIONES VIABLES (+EV)</b>\n\n"
-        f"• 🏆 <b>1X2 / Ganador:</b>\n"
-        f"  └ <i>Local:</i> {m_1x2['odds_home']} ({m_1x2['p_home']*100:.1f}%) | <i>Visita:</i> {m_1x2['odds_away']} ({m_1x2['p_away']*100:.1f}%)\n\n"
-        f"• 📈 <b>Goles & BTTS:</b>\n"
-        f"  └ <i>Más de 2.5:</i> {goals['odds_over']} ({goals['p_over_25']*100:.1f}%) | <i>BTTS:</i> {goals['odds_btts_yes']} ({goals['p_btts_yes']*100:.1f}%)\n\n"
-        f"• 🛡️ <b>Doble Oportunidad:</b>\n"
-        f"  └ <i>1X:</i> {dc['odds_1x']} ({dc['p_1x']*100:.1f}%) | <i>X2:</i> {dc['odds_x2']} ({dc['p_x2']*100:.1f}%)\n\n"
-        f"• ⚖️ <b>Handicap Asiático:</b>\n"
-        f"  └ <i>Local (-0.5):</i> {ah['odds_ah_home']} ({ah['p_ah_home']*100:.1f}%)\n\n"
-        f"• 🚩 <b>Córners (Over 8.5):</b>\n"
-        f"  └ <i>Cuota:</i> {cc['odds_corners_over']} (Prob: {cc['p_corners']*100:.1f}%)\n"
-        f"━━━━━━━━━━━━━━━━━━━"
-    )
-
 # ==========================================
 # 🧠 MOTOR ANALÍTICO Y CALIBRACIÓN
 # ==========================================
@@ -333,7 +320,7 @@ def get_learning_calibration_factor():
     finally:
         conn.close()
 
-async def fetch_fixtures_from_api(date_str):
+async def fetch_fixtures_from_api(date_str, max_hours=None):
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"date": date_str, "timezone": "America/Montevideo"}
@@ -346,13 +333,18 @@ async def fetch_fixtures_from_api(date_str):
                 active_fixtures = []
                 now_utc = datetime.now(timezone.utc)
                 
+                max_time_utc = None
+                if max_hours:
+                    max_time_utc = now_utc + timedelta(hours=max_hours)
+                
                 for fix in fixtures:
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
                     date_iso = fix.get("fixture", {}).get("date")
                     if status_short == "NS" and date_iso:
                         fix_dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
                         if fix_dt > now_utc:
-                            active_fixtures.append(fix)
+                            if max_time_utc is None or fix_dt <= max_time_utc:
+                                active_fixtures.append(fix)
                 return active_fixtures if active_fixtures else []
     except Exception as e:
         logger.error(f"Error consultando API-Football: {e}")
@@ -511,7 +503,6 @@ def calculate_kelly_stake(probability, odds):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_middleware(update)
     user_id = update.effective_user.id
-    is_vip = check_user_vip_status(user_id)
     
     if update.message:
         welcome_text = (
@@ -537,7 +528,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     tz_uy = timezone(timedelta(hours=-3))
     today_str = datetime.now(tz_uy).strftime("%Y-%m-%d")
 
-    # Botones permitidos para usuarios FREE
     if text == "💎 Suscripción VIP":
         paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
         vip_text = (
@@ -596,7 +586,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # Bloqueo para usuarios FREE que intenten acceder a funciones analíticas
     restricted_triggers = ["1X2 / Ganador", "Goles & BTTS", "Doble Oportunidad", "Handicap Asiático", "Córners & Tarjetas", "Combinadas EV+", "Mis Estadísticas", "Top Value +EV", "Panel Admin"]
     if not is_vip and (any(rt in text for rt in restricted_triggers) or len(text) > 2):
         paywall_kb = InlineKeyboardMarkup([
@@ -610,7 +599,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    # Si es VIP, procesamos sus solicitudes normales de menús de análisis
     if "Goles & BTTS" in text:
         await update.message.reply_text(
             "🗓️ <b>Selecciona el rango de fecha para Goles & BTTS:</b>",
@@ -896,6 +884,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Interceptor para submenú de tiempo de hoy
+    elif data.startswith("timeframe_"):
+        prefix = data.split("_")[1]
+        await query.message.edit_text(
+            "⏱️ <b>Selecciona el rango de tiempo deseado para hoy:</b>",
+            parse_mode="HTML",
+            reply_markup=get_timeframe_keyboard(prefix)
+        )
+        return
+
     elif data.startswith("save_"):
         try:
             parts = data.split("_")
@@ -1127,10 +1125,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("loadfixtures_catgoals_"):
         parts = data.split("_")
         selected_date = parts[2]
+        time_filter = parts[3] if len(parts) > 3 else "all"
+        
+        max_hours = None
+        if time_filter == "3h": max_hours = 3
+        elif time_filter == "6h": max_hours = 6
+        elif time_filter == "12h": max_hours = 12
+
         await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos de Goles ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
+        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
             return
             
         shown_count = 0
@@ -1163,10 +1168,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("loadfixtures_cat1x2_"):
         parts = data.split("_")
         selected_date = parts[2]
+        time_filter = parts[3] if len(parts) > 3 else "all"
+        
+        max_hours = None
+        if time_filter == "3h": max_hours = 3
+        elif time_filter == "6h": max_hours = 6
+        elif time_filter == "12h": max_hours = 12
+
         await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos 1X2 ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
+        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
             return
             
         shown_count = 0
@@ -1199,10 +1211,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("loadfixtures_catdc_"):
         parts = data.split("_")
         selected_date = parts[2]
+        time_filter = parts[3] if len(parts) > 3 else "all"
+        
+        max_hours = None
+        if time_filter == "3h": max_hours = 3
+        elif time_filter == "6h": max_hours = 6
+        elif time_filter == "12h": max_hours = 12
+
         await query.message.edit_text(f"🔍 <b>Consultando Doble Oportunidad ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
+        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
             return
             
         shown_count = 0
@@ -1229,10 +1248,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("loadfixtures_catah_"):
         parts = data.split("_")
         selected_date = parts[2]
+        time_filter = parts[3] if len(parts) > 3 else "all"
+        
+        max_hours = None
+        if time_filter == "3h": max_hours = 3
+        elif time_filter == "6h": max_hours = 6
+        elif time_filter == "12h": max_hours = 12
+
         await query.message.edit_text(f"🔍 <b>Consultando Handicap Asiático ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
+        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
             return
             
         shown_count = 0
@@ -1259,10 +1285,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("loadfixtures_catcorners_"):
         parts = data.split("_")
         selected_date = parts[2]
+        time_filter = parts[3] if len(parts) > 3 else "all"
+        
+        max_hours = None
+        if time_filter == "3h": max_hours = 3
+        elif time_filter == "6h": max_hours = 6
+        elif time_filter == "12h": max_hours = 12
+
         await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
+        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes para esta fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
             return
             
         shown_count = 0
@@ -1421,7 +1454,6 @@ async def background_subscription_checker(application):
                 warning_threshold = now + timedelta(days=2)  # Faltan 2 días o menos
 
                 with conn.cursor() as cur:
-                    # 1. Enviar aviso de proximidad de expiración
                     cur.execute(
                         """
                         SELECT telegram_id, expires_at FROM bot_users 
@@ -1452,7 +1484,6 @@ async def background_subscription_checker(application):
                         except Exception as ex:
                             logger.error(f"No se pudo enviar aviso de expiración a {uid}: {ex}")
 
-                    # 2. Expirar cuentas vencidas
                     cur.execute(
                         """
                         UPDATE bot_users 
@@ -1493,7 +1524,7 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
 
-    logger.info("Iniciando bot con restricción de acceso VIP y control de 30 días...")
+    logger.info("Iniciando bot con filtro de horas y control de 30 días...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
