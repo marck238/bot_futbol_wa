@@ -1155,14 +1155,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif time_filter == "6h": max_hours = 6
         elif time_filter == "12h": max_hours = 12
 
-        await query.message.edit_text(f"🔍 <b>Analizando partidos en el rango seleccionado ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Analizando, filtrando y ordenando partidos por probabilidad ({selected_date})...</b>", parse_mode="HTML")
         
         fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos pendientes en ese rango exacto de horas.")
             return
 
-        shown_count = 0
+        valid_predictions = []
+
         for fix in fixtures:
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
@@ -1178,40 +1179,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 goals_data = analytics["goals"]
                 if goals_data["odds_over"] < 1.55:
                     continue
-                card_text = format_goals_card(league_info, home, away, match_time, goals_data["odds_over"], goals_data["p_over_25"], goals_data["odds_btts_yes"], goals_data["p_btts_yes"], goals_data["odds_btts_1h"], goals_data["p_btts_1h"], calculate_kelly_stake(goals_data["p_over_25"], goals_data["odds_over"]))
+                prob = goals_data["p_over_25"]
+                card_text = format_goals_card(league_info, home, away, match_time, goals_data["odds_over"], prob, goals_data["odds_btts_yes"], goals_data["p_btts_yes"], goals_data["odds_btts_1h"], goals_data["p_btts_1h"], calculate_kelly_stake(prob, goals_data["odds_over"]))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]])
 
             elif prefix == "cat1x2":
                 m_1x2 = analytics["market_1x2"]
                 if m_1x2["p_home"] < 0.48 and m_1x2["p_away"] < 0.48:
                     continue
+                prob = max(m_1x2["p_home"], m_1x2["p_away"])
                 card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"save_{fid}_1X2")]])
 
             elif prefix == "catdc":
                 dc = analytics["double_chance"]
-                card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(dc["p_1x"], dc["odds_1x"]))
+                prob = max(dc["p_1x"], dc["p_x2"])
+                card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(prob, dc["odds_1x"]))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Doble Oportunidad (1X)", callback_data=f"save_{fid}_DC")]])
 
             elif prefix == "catah":
                 ah = analytics["asian_handicap"]
-                card_text = format_asian_handicap_card(league_info, home, away, match_time, ah["p_ah_home"], ah["odds_ah_home"], calculate_kelly_stake(ah["p_ah_home"], ah["odds_ah_home"]))
+                prob = ah["p_ah_home"]
+                card_text = format_asian_handicap_card(league_info, home, away, match_time, prob, ah["odds_ah_home"], calculate_kelly_stake(prob, ah["odds_ah_home"]))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Handicap Local (-0.5)", callback_data=f"save_{fid}_AH")]])
 
             elif prefix == "catcorners":
                 cc = analytics["corners_cards"]
                 if cc["odds_corners_over"] < 1.65:
                     continue
-                card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
+                prob = cc["p_corners"]
+                card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], prob, cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(prob, cc["odds_corners_over"]))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"save_{fid}_CORNERS")]])
             else:
                 continue
 
-            shown_count += 1
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-        
-        if shown_count == 0:
+            valid_predictions.append({
+                "probability": prob,
+                "text": card_text,
+                "reply_markup": btn
+            })
+
+        if not valid_predictions:
             await query.message.reply_text("ℹ️ No hay partidos que cumplan con los filtros de valor y cuota en este rango horario.")
+            return
+
+        # 🔄 ORDENAR DE MAYOR A MENOR PROBABILIDAD
+        valid_predictions.sort(key=lambda x: x["probability"], reverse=True)
+
+        for item in valid_predictions:
+            await query.message.reply_text(item["text"], parse_mode="HTML", reply_markup=item["reply_markup"])
         return
 
 # ==========================================
@@ -1414,7 +1430,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con filtros horarios reales y estricta calibración 1X2...")
+    logger.info("Iniciando bot con ordenamiento automático por probabilidad...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
