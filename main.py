@@ -202,18 +202,19 @@ def format_match_time(fix):
 
 def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_draw, odds_draw, p_away, odds_away, stake_pick):
     ev_home = (p_home * odds_home) - 1
-    if p_home >= 0.45 and ev_home > 0:
-        recommendation = f"🟢 **Apostar por la Victoria Local ({home})**\n💡 <i>Probabilidad sólida con valor esperado positivo (+EV).</i>"
-    elif p_home >= 0.38:
-        recommendation = f"🟡 **Oportunidad Moderada en Local ({home})**\n💡 <i>Cuota atractiva, evaluar stake prudente.</i>"
+    # Filtro estricto calibrado para evitar falsos favoritos
+    if p_home >= 0.55 and ev_home > 0.05:
+        recommendation = f"🟢 **Apostar por la Victoria Local ({home})**\n💡 <i>Alta probabilidad matemática (+55%) y valor esperado positivo.</i>"
+    elif p_home >= 0.45 and ev_home > 0:
+        recommendation = f"🟡 **Oportunidad Moderada en Local ({home})**\n💡 <i>Margen ajustado. Evaluar cobertura (Doble Oportunidad) o stake reducido.</i>"
     else:
-        recommendation = "⚠️ **Partido Emparejado / Sin Valor Claro**\n💡 <i>Se recomiendan mercados alternativos o evitar este encuentro.</i>"
+        recommendation = "⚠️ **Partido Disparejo / Alto Riesgo de Empate**\n💡 <i>Poisson detecta alta paridad. Se sugiere evitar este 1X2 o usar Doble Oportunidad (1X).</i>"
 
     return (
         f"🏆 <b>{home} vs {away}</b>\n"
         f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>MERCADO 1X2 / GANADOR</b>\n\n"
+        f"📊 <b>MERCADO 1X2 / GANADOR (CALIBRADO)</b>\n\n"
         f"• 🏠 <b>Victoria Local:</b> {odds_home:.2f}  <code>({p_home*100:.1f}%)</code>\n"
         f"• 🤝 <b>Empate:</b> {odds_draw:.2f}  <code>({p_draw*100:.1f}%)</code>\n"
         f"• ✈ <b>Victoria Visitante:</b> {odds_away:.2f}  <code>({p_away*100:.1f}%)</code>\n\n"
@@ -907,7 +908,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Interceptor para submenú de tiempo de hoy
     elif data.startswith("timeframe_"):
         prefix = data.split("_")[1]
         await query.message.edit_text(
@@ -1218,7 +1218,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             m_1x2 = (await generate_fixture_analytics_real(fix))["market_1x2"]
             
-            if m_1x2["odds_home"] < 1.60 and m_1x2["odds_away"] < 1.60:
+            # Filtro más exigente para mostrar partidos 1X2 (probabilidad mínima de local o visita mayor a 48%)
+            if m_1x2["p_home"] < 0.48 and m_1x2["p_away"] < 0.48:
                 continue
 
             shown_count += 1
@@ -1229,7 +1230,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
         
         if shown_count == 0:
-            await query.message.reply_text("ℹ No se encontraron partidos con cuotas de valor mínimo para este mercado en esta fecha.")
+            await query.message.reply_text("ℹ No se encontraron partidos con cuotas y probabilidades suficientemente sólidas para 1X2 en esta fecha.")
 
     elif data.startswith("loadfixtures_catdc_"):
         parts = data.split("_")
@@ -1548,7 +1549,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con reenvío automático de comprobantes al admin...")
+    logger.info("Iniciando bot con filtro 1X2 calibrado y estricto...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
