@@ -202,7 +202,6 @@ def format_match_time(fix):
 
 def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_draw, odds_draw, p_away, odds_away, stake_pick):
     ev_home = (p_home * odds_home) - 1
-    # Filtro estricto calibrado para evitar falsos favoritos
     if p_home >= 0.55 and ev_home > 0.05:
         recommendation = f"🟢 **Apostar por la Victoria Local ({home})**\n💡 <i>Alta probabilidad matemática (+55%) y valor esperado positivo.</i>"
     elif p_home >= 0.45 and ev_home > 0:
@@ -1145,209 +1144,75 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 conn.close()
 
-    elif data.startswith("loadfixtures_catgoals_"):
+    elif data.startswith("loadfixtures_"):
         parts = data.split("_")
+        prefix = parts[1]
         selected_date = parts[2]
         time_filter = parts[3] if len(parts) > 3 else "all"
-        
+
         max_hours = None
         if time_filter == "3h": max_hours = 3
         elif time_filter == "6h": max_hours = 6
         elif time_filter == "12h": max_hours = 12
 
-        await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos de Goles ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Analizando partidos en el rango seleccionado ({selected_date})...</b>", parse_mode="HTML")
+        
         fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
+            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en ese rango exacto de horas.")
             return
-            
+
         shown_count = 0
         for fix in fixtures:
-            if shown_count >= 5:
-                break
             fid = fix.get("fixture", {}).get("id", 0)
             teams = fix.get("teams", {})
             league = fix.get("league", {})
             league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
             home = teams.get("home", {}).get("name", "Local")
             away = teams.get("away", {}).get("name", "Visitante")
-            
             match_time = format_match_time(fix)
-            analytics = (await generate_fixture_analytics_real(fix))["goals"]
             
-            if analytics["odds_over"] < 1.55:
+            analytics = await generate_fixture_analytics_real(fix)
+
+            if prefix == "catgoals":
+                goals_data = analytics["goals"]
+                if goals_data["odds_over"] < 1.55:
+                    continue
+                card_text = format_goals_card(league_info, home, away, match_time, goals_data["odds_over"], goals_data["p_over_25"], goals_data["odds_btts_yes"], goals_data["p_btts_yes"], goals_data["odds_btts_1h"], goals_data["p_btts_1h"], calculate_kelly_stake(goals_data["p_over_25"], goals_data["odds_over"]))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]])
+
+            elif prefix == "cat1x2":
+                m_1x2 = analytics["market_1x2"]
+                if m_1x2["p_home"] < 0.48 and m_1x2["p_away"] < 0.48:
+                    continue
+                card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"save_{fid}_1X2")]])
+
+            elif prefix == "catdc":
+                dc = analytics["double_chance"]
+                card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(dc["p_1x"], dc["odds_1x"]))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Doble Oportunidad (1X)", callback_data=f"save_{fid}_DC")]])
+
+            elif prefix == "catah":
+                ah = analytics["asian_handicap"]
+                card_text = format_asian_handicap_card(league_info, home, away, match_time, ah["p_ah_home"], ah["odds_ah_home"], calculate_kelly_stake(ah["p_ah_home"], ah["odds_ah_home"]))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Handicap Local (-0.5)", callback_data=f"save_{fid}_AH")]])
+
+            elif prefix == "catcorners":
+                cc = analytics["corners_cards"]
+                if cc["odds_corners_over"] < 1.65:
+                    continue
+                card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"save_{fid}_CORNERS")]])
+            else:
                 continue
 
             shown_count += 1
-            card_text = format_goals_card(league_info, home, away, match_time, analytics["odds_over"], analytics["p_over_25"], analytics["odds_btts_yes"], analytics["p_btts_yes"], analytics["odds_btts_1h"], analytics["p_btts_1h"], calculate_kelly_stake(analytics["p_over_25"], analytics["odds_over"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]
-            ])
             await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
         
         if shown_count == 0:
-            await query.message.reply_text("ℹ No se encontraron partidos que cumplan con el filtro estricto para esta fecha.")
-
-    elif data.startswith("loadfixtures_cat1x2_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        time_filter = parts[3] if len(parts) > 3 else "all"
-        
-        max_hours = None
-        if time_filter == "3h": max_hours = 3
-        elif time_filter == "6h": max_hours = 6
-        elif time_filter == "12h": max_hours = 12
-
-        await query.message.edit_text(f"🔍 <b>Consultando y filtrando partidos 1X2 ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            m_1x2 = (await generate_fixture_analytics_real(fix))["market_1x2"]
-            
-            # Filtro más exigente para mostrar partidos 1X2 (probabilidad mínima de local o visita mayor a 48%)
-            if m_1x2["p_home"] < 0.48 and m_1x2["p_away"] < 0.48:
-                continue
-
-            shown_count += 1
-            card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Victoria Local", callback_data=f"save_{fid}_1X2")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-        
-        if shown_count == 0:
-            await query.message.reply_text("ℹ No se encontraron partidos con cuotas y probabilidades suficientemente sólidas para 1X2 en esta fecha.")
-
-    elif data.startswith("loadfixtures_catdc_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        time_filter = parts[3] if len(parts) > 3 else "all"
-        
-        max_hours = None
-        if time_filter == "3h": max_hours = 3
-        elif time_filter == "6h": max_hours = 6
-        elif time_filter == "12h": max_hours = 12
-
-        await query.message.edit_text(f"🔍 <b>Consultando Doble Oportunidad ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            dc = (await generate_fixture_analytics_real(fix))["double_chance"]
-
-            shown_count += 1
-            card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(dc["p_1x"], dc["odds_1x"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Doble Oportunidad (1X)", callback_data=f"save_{fid}_DC")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-
-    elif data.startswith("loadfixtures_catah_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        time_filter = parts[3] if len(parts) > 3 else "all"
-        
-        max_hours = None
-        if time_filter == "3h": max_hours = 3
-        elif time_filter == "6h": max_hours = 6
-        elif time_filter == "12h": max_hours = 12
-
-        await query.message.edit_text(f"🔍 <b>Consultando Handicap Asiático ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            ah = (await generate_fixture_analytics_real(fix))["asian_handicap"]
-
-            shown_count += 1
-            card_text = format_asian_handicap_card(league_info, home, away, match_time, ah["p_ah_home"], ah["odds_ah_home"], calculate_kelly_stake(ah["p_ah_home"], ah["odds_ah_home"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Handicap Local (-0.5)", callback_data=f"save_{fid}_AH")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-
-    elif data.startswith("loadfixtures_catcorners_"):
-        parts = data.split("_")
-        selected_date = parts[2]
-        time_filter = parts[3] if len(parts) > 3 else "all"
-        
-        max_hours = None
-        if time_filter == "3h": max_hours = 3
-        elif time_filter == "6h": max_hours = 6
-        elif time_filter == "12h": max_hours = 12
-
-        await query.message.edit_text(f"🔍 <b>Consultando Córners y Tarjetas ({selected_date})...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
-        if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos pendientes en el rango de tiempo seleccionado.")
-            return
-            
-        shown_count = 0
-        for fix in fixtures:
-            if shown_count >= 5:
-                break
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            
-            match_time = format_match_time(fix)
-            cc = (await generate_fixture_analytics_real(fix))["corners_cards"]
-            
-            if cc["odds_corners_over"] < 1.65:
-                continue
-
-            shown_count += 1
-            card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], cc["odds_corners_over"], cc["p_corners"], cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(cc["p_corners"], cc["odds_corners_over"]))
-            btn = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📌 Guardar Córners Over", callback_data=f"save_{fid}_CORNERS")]
-            ])
-            await query.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
-        
-        if shown_count == 0:
-            await query.message.reply_text("ℹ️ No se encontraron partidos con filtros óptimos para córners en esta fecha.")
+            await query.message.reply_text("ℹ️ No hay partidos que cumplan con los filtros de valor y cuota en este rango horario.")
+        return
 
 # ==========================================
 # ⚙️ WORKERS DE AUTO-LIQUIDACIÓN Y SUSCRIPCIÓN
@@ -1549,7 +1414,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con filtro 1X2 calibrado y estricto...")
+    logger.info("Iniciando bot con filtros horarios reales y estricta calibración 1X2...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
