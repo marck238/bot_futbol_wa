@@ -172,6 +172,19 @@ def get_fecha_selector_keyboard(prefix: str):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_top_value_fecha_keyboard():
+    tz = timezone(timedelta(hours=-3))
+    hoy = datetime.now(tz).date()
+    mañana = hoy + timedelta(days=1)
+    pasado = hoy + timedelta(days=2)
+    
+    keyboard = [
+        [InlineKeyboardButton("📅 Top Value para hoy", callback_data=f"topval_{hoy.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Top Value para mañana", callback_data=f"topval_{mañana.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Top Value para pasado mañana", callback_data=f"topval_{pasado.strftime('%Y-%m-%d')}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 def get_timeframe_keyboard(prefix: str):
     tz = timezone(timedelta(hours=-3))
     hoy_str = datetime.now(tz).strftime('%Y-%m-%d')
@@ -213,7 +226,7 @@ def format_1x2_card(league_info, home, away, match_time, p_home, odds_home, p_dr
         f"🏆 <b>{home} vs {away}</b>\n"
         f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>MERCADO 1X2 / GANADOR (CALIBRADO)</b>\n\n"
+        f"📊 <b>MERCADO 1X2 / GANADOR</b>\n\n"
         f"• 🏠 <b>Victoria Local:</b> {odds_home:.2f}  <code>({p_home*100:.1f}%)</code>\n"
         f"• 🤝 <b>Empate:</b> {odds_draw:.2f}  <code>({p_draw*100:.1f}%)</code>\n"
         f"• ✈ <b>Victoria Visitante:</b> {odds_away:.2f}  <code>({p_away*100:.1f}%)</code>\n\n"
@@ -709,66 +722,12 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 conn.close()
             
     elif "Top Value +EV" in text:
-        await update.message.reply_text("🎯 Buscando la oportunidad con mayor valor esperado (`+EV`) entre todos los mercados disponibles...", reply_markup=get_keyboard_for_user(user_id))
-        try:
-            fixtures_data = await fetch_fixtures_from_api(today_str)
-            best_pick = None
-            max_ev = -999
-            
-            for fix in fixtures_data[:12]:
-                analysis = await generate_fixture_analytics_real(fix)
-                h_name = fix.get("teams", {}).get("home", {}).get("name", "Local")
-                a_name = fix.get("teams", {}).get("away", {}).get("name", "Visita")
-                league_name = fix.get("league", {}).get("name", "Liga")
-                match_time = format_match_time(fix)
-                
-                markets_to_check = [
-                    {"name": "Victoria Local (1X2)", "prob": analysis["market_1x2"]["p_home"], "odds": analysis["market_1x2"]["odds_home"]},
-                    {"name": "Victoria Visitante (1X2)", "prob": analysis["market_1x2"]["p_away"], "odds": analysis["market_1x2"]["odds_away"]},
-                    {"name": "Más de 2.5 Goles", "prob": analysis["goals"]["p_over_25"], "odds": analysis["goals"]["odds_over"]},
-                    {"name": "Ambos Anotan (BTTS)", "prob": analysis["goals"]["p_btts_yes"], "odds": analysis["goals"]["odds_btts_yes"]},
-                    {"name": "Doble Oportunidad (1X)", "prob": analysis["double_chance"]["p_1x"], "odds": analysis["double_chance"]["odds_1x"]},
-                    {"name": "Doble Oportunidad (X2)", "prob": analysis["double_chance"]["p_x2"], "odds": analysis["double_chance"]["odds_x2"]},
-                    {"name": "Handicap Asiático (-0.5)", "prob": analysis["asian_handicap"]["p_ah_home"], "odds": analysis["asian_handicap"]["odds_ah_home"]},
-                    {"name": "Más de 8.5 Córners", "prob": analysis["corners_cards"]["p_corners"], "odds": analysis["corners_cards"]["odds_corners_over"]}
-                ]
-                
-                for m in markets_to_check:
-                    p = m["prob"]
-                    odds = m["odds"]
-                    ev_val = (p * odds) - 1
-                    
-                    if ev_val > max_ev:
-                        max_ev = ev_val
-                        best_pick = {
-                            "match": f"{h_name} vs {a_name}",
-                            "league": league_name,
-                            "time": match_time,
-                            "market": m["name"],
-                            "prob": p,
-                            "odds": odds,
-                            "ev": ev_val,
-                            "stake": calculate_kelly_stake(p, odds)
-                        }
-            
-            if best_pick and max_ev > 0:
-                text_out = (
-                    f"🔥 **APUESTA TOP VALUE (+EV) DEL DÍA** 🔥\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"🏆 **{best_pick['match']}**\n"
-                    f"🌐 *{best_pick['league']}* | ⏰ `{best_pick['time']} HS`\n\n"
-                    f"📌 **Mercado:** {best_pick['market']}\n"
-                    f"📊 **Probabilidad:** `{int(best_pick['prob']*100)}%` | 📐 **Cuota:** `{best_pick['odds']}`\n"
-                    f"📈 **Valor Esperado (EV):** `+{int(best_pick['ev']*100)}%`\n"
-                    f"💰 **Stake Recomendado (Kelly):** `{best_pick['stake']}%`\n"
-                    f"━━━━━━━━━━━━━━━━━━━"
-                )
-                await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=get_keyboard_for_user(user_id))
-            else:
-                await update.message.reply_text("⚠️ No se encontró ninguna apuesta con EV positivo claro en este momento.", reply_markup=get_keyboard_for_user(user_id))
-        except Exception as e:
-            logger.error(f"Error en Top Value: {e}")
-            await update.message.reply_text("❌ Ocurrió un error al calcular el Top Value.", reply_markup=get_keyboard_for_user(user_id))
+        await update.message.reply_text(
+            "🗓️ <b>Selecciona el día para buscar el mejor Top Value (+EV):</b>",
+            parse_mode="HTML",
+            reply_markup=get_top_value_fecha_keyboard()
+        )
+        return
 
     elif "Combinada" in text or "EV+" in text:
         await update.message.reply_text("🍀 Generando combinada inteligente con valor esperado positivo (`+EV`) para hoy...", reply_markup=get_keyboard_for_user(user_id))
@@ -914,6 +873,71 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=get_timeframe_keyboard(prefix)
         )
+        return
+
+    elif data.startswith("topval_"):
+        selected_date = data.split("_")[1]
+        await query.message.edit_text(f"🎯 Buscando la oportunidad con mayor valor esperado (`+EV`) para el día <b>{selected_date}</b>...", parse_mode="HTML")
+        
+        try:
+            fixtures_data = await fetch_fixtures_from_api(selected_date)
+            best_pick = None
+            max_ev = -999
+            
+            for fix in fixtures_data[:15]:
+                analysis = await generate_fixture_analytics_real(fix)
+                h_name = fix.get("teams", {}).get("home", {}).get("name", "Local")
+                a_name = fix.get("teams", {}).get("away", {}).get("name", "Visita")
+                league_name = fix.get("league", {}).get("name", "Liga")
+                match_time = format_match_time(fix)
+                
+                markets_to_check = [
+                    {"name": "Victoria Local (1X2)", "prob": analysis["market_1x2"]["p_home"], "odds": analysis["market_1x2"]["odds_home"]},
+                    {"name": "Victoria Visitante (1X2)", "prob": analysis["market_1x2"]["p_away"], "odds": analysis["market_1x2"]["odds_away"]},
+                    {"name": "Más de 2.5 Goles", "prob": analysis["goals"]["p_over_25"], "odds": analysis["goals"]["odds_over"]},
+                    {"name": "Ambos Anotan (BTTS)", "prob": analysis["goals"]["p_btts_yes"], "odds": analysis["goals"]["odds_btts_yes"]},
+                    {"name": "Doble Oportunidad (1X)", "prob": analysis["double_chance"]["p_1x"], "odds": analysis["double_chance"]["odds_1x"]},
+                    {"name": "Doble Oportunidad (X2)", "prob": analysis["double_chance"]["p_x2"], "odds": analysis["double_chance"]["odds_x2"]},
+                    {"name": "Handicap Asiático (-0.5)", "prob": analysis["asian_handicap"]["p_ah_home"], "odds": analysis["asian_handicap"]["odds_ah_home"]},
+                    {"name": "Más de 8.5 Córners", "prob": analysis["corners_cards"]["p_corners"], "odds": analysis["corners_cards"]["odds_corners_over"]}
+                ]
+                
+                for m in markets_to_check:
+                    p = m["prob"]
+                    odds = m["odds"]
+                    ev_val = (p * odds) - 1
+                    
+                    if ev_val > max_ev:
+                        max_ev = ev_val
+                        best_pick = {
+                            "match": f"{h_name} vs {a_name}",
+                            "league": league_name,
+                            "time": match_time,
+                            "market": m["name"],
+                            "prob": p,
+                            "odds": odds,
+                            "ev": ev_val,
+                            "stake": calculate_kelly_stake(p, odds)
+                        }
+            
+            if best_pick and max_ev > 0:
+                text_out = (
+                    f"🔥 <b>APUESTA TOP VALUE (+EV) - {selected_date}</b> 🔥\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"🏆 <b>{best_pick['match']}</b>\n"
+                    f"🌐 <i>{best_pick['league']}</i> | ⏰ <code>{best_pick['time']} HS</code>\n\n"
+                    f"📌 <b>Mercado:</b> {best_pick['market']}\n"
+                    f"📊 <b>Probabilidad:</b> <code>{int(best_pick['prob']*100)}%</code> | 📐 <b>Cuota:</b> <code>{best_pick['odds']}</code>\n"
+                    f"📈 <b>Valor Esperado (EV):</b> <code>+{int(best_pick['ev']*100)}%</code>\n"
+                    f"💰 <b>Stake Recomendado (Kelly):</b> <code>{best_pick['stake']}%</code>\n"
+                    f"━━━━━━━━━━━━━━━━━━━"
+                )
+                await query.message.reply_text(text_out, parse_mode="HTML")
+            else:
+                await query.message.reply_text("⚠️ No se encontró ninguna apuesta con EV positivo claro para la fecha seleccionada.")
+        except Exception as e:
+            logger.error(f"Error en Top Value por fecha: {e}")
+            await query.message.reply_text("❌ Ocurrió un error al calcular el Top Value para esa fecha.")
         return
 
     elif data.startswith("save_"):
@@ -1430,7 +1454,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con ordenamiento automático por probabilidad...")
+    logger.info("Iniciando bot con selector de fecha para Top Value +EV...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
