@@ -296,15 +296,27 @@ def format_double_chance_card(league_info, home, away, match_time, p_1x, odds_1x
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
-def format_asian_handicap_card(league_info, home, away, match_time, p_ah_home, odds_ah_home, stake_ah):
+def format_asian_handicap_card(league_info, home, away, match_time, selected_team, p_ah, odds_ah, stake_ah):
+    team_name = home if selected_team == "home" else away
+    handicap_label = "Local (-0.5)" if selected_team == "home" else "Visitante (-0.5)"
+    ev_ah = (p_ah * odds_ah) - 1
+
+    if p_ah >= 0.55 and ev_ah > 0.02:
+        recommendation = f"🟢 **Entrar a Hándicap {handicap_label} ({team_name})**\n💡 <i>Alta probabilidad matemática de victoria directa y valor esperado positivo.</i>"
+    elif p_ah >= 0.48:
+        recommendation = f"🟡 **Oportunidad Moderada en Hándicap {handicap_label}**\n💡 <i>Margen competitivo. Evaluar cuota y stake ajustado.</i>"
+    else:
+        recommendation = "⚠️ **Hándicap de Alto Riesgo**\n💡 <i>Alta probabilidad de empate o resistencia del rival. Precaución.</i>"
+
     return (
         f"⚖️ <b>{home} vs {away}</b>\n"
         f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⚖️ <b>MERCADO HANDICAP ASIÁTICO (-0.5)</b>\n\n"
-        f"• 🏠 <b>Local (-0.5):</b> {odds_ah_home:.2f}  <code>({p_ah_home*100:.1f}%)</code>\n\n"
-        f"🎯 <b>Acción Sugerida:</b>\n"
-        f"🟢 <i>Equivale a victoria simple eliminando el empate (si gana el local, la apuesta es ganadora).</i>\n\n"
+        f"• 🎯 <b>Selección Óptima:</b> <b>{team_name} (-0.5)</b>\n"
+        f"• 📊 <b>Probabilidad:</b> <code>{p_ah*100:.1f}%</code> | 📐 <b>Cuota:</b> <code>{odds_ah:.2f}</code>\n"
+        f"• 📈 <b>Valor Esperado (EV):</b> <code>+{int(ev_ah*100)}%</code>\n\n"
+        f"🎯 <b>Acción Sugerida:</b>\n{recommendation}\n\n"
         f"💰 <b>Stake Kelly:</b> <code>{stake_ah}% de tu bankroll</code>\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
@@ -478,7 +490,14 @@ async def generate_fixture_analytics_real(fix):
 
     p_1x = min(0.95, p_home + p_draw)
     p_x2 = min(0.95, p_away + p_draw)
-    p_ah_home = p_home
+    
+    # Hándicap Asiático (-0.5): Analizamos tanto local como visitante y elegimos el más favorable
+    non_draw_total = max(0.1, (p_home + p_away))
+    p_ah_home = round(p_home / non_draw_total, 3)
+    p_ah_home = min(0.92, max(0.10, p_ah_home * calibration))
+
+    p_ah_away = round(p_away / non_draw_total, 3)
+    p_ah_away = min(0.92, max(0.10, p_ah_away * calibration))
 
     margin = 1.05
     odds_home = round(margin / max(0.05, p_home), 2)
@@ -489,7 +508,19 @@ async def generate_fixture_analytics_real(fix):
     
     odds_1x = round(margin / max(0.05, p_1x), 2)
     odds_x2 = round(margin / max(0.05, p_x2), 2)
+    
     odds_ah_home = round(margin / max(0.05, p_ah_home), 2)
+    odds_ah_away = round(margin / max(0.05, p_ah_away), 2)
+
+    # Determinar cuál hándicap (-0.5) tiene mejor valor o probabilidad
+    if p_ah_home >= p_ah_away:
+        ah_selection = "home"
+        p_ah_final = p_ah_home
+        odds_ah_final = odds_ah_home
+    else:
+        ah_selection = "away"
+        p_ah_final = p_ah_away
+        odds_ah_final = odds_ah_away
 
     offensive_intensity = lambda_home + lambda_away
     avg_corners = round(8.0 + (offensive_intensity * 1.2), 1)
@@ -514,7 +545,9 @@ async def generate_fixture_analytics_real(fix):
             "p_1x": p_1x, "odds_1x": odds_1x, "p_x2": p_x2, "odds_x2": odds_x2
         },
         "asian_handicap": {
-            "p_ah_home": p_ah_home, "odds_ah_home": odds_ah_home
+            "selection": ah_selection,
+            "p_ah": p_ah_final,
+            "odds_ah": odds_ah_final
         },
         "corners_cards": {
             "avg_corners": avg_corners, "p_corners": p_corners, "odds_corners_over": odds_corners_over,
@@ -923,7 +956,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"name": "Ambos Anotan (BTTS)", "prob": analysis["goals"]["p_btts_yes"], "odds": analysis["goals"]["odds_btts_yes"]},
                     {"name": "Doble Oportunidad (1X)", "prob": analysis["double_chance"]["p_1x"], "odds": analysis["double_chance"]["odds_1x"]},
                     {"name": "Doble Oportunidad (X2)", "prob": analysis["double_chance"]["p_x2"], "odds": analysis["double_chance"]["odds_x2"]},
-                    {"name": "Handicap Asiático (-0.5)", "prob": analysis["asian_handicap"]["p_ah_home"], "odds": analysis["asian_handicap"]["odds_ah_home"]},
+                    {"name": f"Handicap Asiático ({analysis['asian_handicap']['selection']})", "prob": analysis["asian_handicap"]["p_ah"], "odds": analysis["asian_handicap"]["odds_ah"]},
                     {"name": "Más de 8.5 Córners", "prob": analysis["corners_cards"]["p_corners"], "odds": analysis["corners_cards"]["odds_corners_over"]}
                 ]
                 
@@ -1248,9 +1281,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif prefix == "catah":
                 ah = analytics["asian_handicap"]
-                prob = ah["p_ah_home"]
-                card_text = format_asian_handicap_card(league_info, home, away, match_time, prob, ah["odds_ah_home"], calculate_kelly_stake(prob, ah["odds_ah_home"]))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Handicap Local (-0.5)", callback_data=f"save_{fid}_AH")]])
+                prob = ah["p_ah"]
+                card_text = format_asian_handicap_card(league_info, home, away, match_time, ah["selection"], prob, ah["odds_ah"], calculate_kelly_stake(prob, ah["odds_ah"]))
+                team_label = home if ah["selection"] == "home" else away
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar Hándicap {team_label} (-0.5)", callback_data=f"save_{fid}_AH")]])
 
             elif prefix == "catcorners":
                 cc = analytics["corners_cards"]
@@ -1479,7 +1513,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con alertas de nuevos usuarios...")
+    logger.info("Iniciando bot con Hándicap Asiático dinámico (Local / Visitante)...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
