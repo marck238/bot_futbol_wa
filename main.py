@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 import asyncio
 import math
@@ -592,6 +592,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     
     tz_uy = timezone(timedelta(hours=-3))
     today_str = datetime.now(tz_uy).strftime("%Y-%m-%d")
+    tomorrow_str = (datetime.now(tz_uy) + timedelta(days=1)).strftime("%Y-%m-%d")
+    after_tomorrow_str = (datetime.now(tz_uy) + timedelta(days=2)).strftime("%Y-%m-%d")
 
     if text == "💎 Suscripción VIP":
         paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
@@ -652,6 +654,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     restricted_triggers = ["1X2 / Ganador", "Goles & BTTS", "Doble Oportunidad", "Handicap Asiático", "Córners & Tarjetas", "Combinadas EV+", "Mis Estadísticas", "Top Value +EV", "Panel Admin"]
+    
+    # Si NO es VIP y escribe texto libre o un disparador restringido, bloqueamos
     if not is_vip and (any(rt in text for rt in restricted_triggers) or len(text) > 2):
         paywall_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("💎 Obtener Acceso VIP ($15/mes)", callback_data="go_to_vip_menu")]
@@ -856,6 +860,47 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "👇 <i>Selecciona una acción de control administrativo:</i>"
         )
         await update.message.reply_text(admin_text, parse_mode="HTML", reply_markup=admin_keyboard)
+
+    else:
+        # ==========================================
+        # 🔍 BÚSQUEDA ESPECÍFICA POR NOMBRE DE EQUIPO (VIP / ADMIN)
+        # ==========================================
+        if is_vip:
+            search_query = text.lower()
+            await update.message.reply_text(f"🔍 Buscando partidos para <b>'{text}'</b> (hoy, mañana y pasado mañana)...", parse_mode="HTML")
+            
+            dates_to_search = [today_str, tomorrow_str, after_tomorrow_str]
+            found_matches = []
+
+            for d_str in dates_to_search:
+                fixtures = await fetch_fixtures_from_api(d_str)
+                for fix in fixtures:
+                    home_name = fix.get("teams", {}).get("home", {}).get("name", "").lower()
+                    away_name = fix.get("teams", {}).get("away", {}).get("name", "").lower()
+                    
+                    if search_query in home_name or search_query in away_name:
+                        found_matches.append(fix)
+
+            if not found_matches:
+                await update.message.reply_text(f"⚠️ No se encontraron partidos programados para <b>'{text}'</b> en los próximos 3 días.", parse_mode="HTML")
+                return
+
+            for fix in found_matches[:5]:  # Limitar a máximo 5 resultados para no saturar
+                fid = fix.get("fixture", {}).get("id", 0)
+                teams = fix.get("teams", {})
+                league = fix.get("league", {})
+                league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
+                home = teams.get("home", {}).get("name", "Local")
+                away = teams.get("away", {}).get("name", "Visitante")
+                match_time = format_match_time(fix)
+                
+                analytics = await generate_fixture_analytics_real(fix)
+                m_1x2 = analytics["market_1x2"]
+                
+                card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_1X2")]])
+                
+                await update.message.reply_text(card_text, parse_mode="HTML", reply_markup=btn)
 
 # ==========================================
 # 🎛️ MANEJADOR DE CALLBACKS
@@ -1233,7 +1278,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob = goals_data["p_over_25"]
                 odds = goals_data["odds_over"]
                 ev = (prob * odds) - 1
-                # FILTRO ESTRICTO: Probabilidad >= 52% y EV > +5%
                 if prob < 0.52 or ev < 0.05:
                     continue
                 card_text = format_goals_card(league_info, home, away, match_time, odds, prob, goals_data["odds_btts_yes"], goals_data["p_btts_yes"], goals_data["odds_btts_1h"], goals_data["p_btts_1h"], calculate_kelly_stake(prob, odds))
@@ -1244,7 +1288,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob = max(m_1x2["p_home"], m_1x2["p_away"])
                 odds = m_1x2["odds_home"] if prob == m_1x2["p_home"] else m_1x2["odds_away"]
                 ev = (prob * odds) - 1
-                # FILTRO ESTRICTO: Probabilidad >= 55% y EV > +5%
                 if prob < 0.55 or ev < 0.05:
                     continue
                 card_text = format_1x2_card(league_info, home, away, match_time, m_1x2["p_home"], m_1x2["odds_home"], m_1x2["p_draw"], m_1x2["odds_draw"], m_1x2["p_away"], m_1x2["odds_away"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
@@ -1255,7 +1298,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob = max(dc["p_1x"], dc["p_x2"])
                 odds = dc["odds_1x"] if prob == dc["p_1x"] else dc["odds_x2"]
                 ev = (prob * odds) - 1
-                # FILTRO ESTRICTO: Probabilidad >= 70%
                 if prob < 0.70:
                     continue
                 card_text = format_double_chance_card(league_info, home, away, match_time, dc["p_1x"], dc["odds_1x"], dc["p_x2"], dc["odds_x2"], calculate_kelly_stake(prob, odds))
@@ -1266,7 +1308,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob = ah["p_ah"]
                 odds = ah["odds_ah"]
                 ev = (prob * odds) - 1
-                # FILTRO ESTRICTO: Probabilidad >= 55% y EV > +5%
                 if prob < 0.55 or ev < 0.05:
                     continue
                 card_text = format_asian_handicap_card(league_info, home, away, match_time, ah["selection"], prob, odds, calculate_kelly_stake(prob, odds))
@@ -1278,7 +1319,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob = cc["p_corners"]
                 odds = cc["odds_corners_over"]
                 ev = (prob * odds) - 1
-                # FILTRO ESTRICTO: Probabilidad >= 55% y EV > +5%
                 if prob < 0.55 or ev < 0.05:
                     continue
                 card_text = format_corners_cards(league_info, home, away, match_time, cc["avg_corners"], odds, prob, cc["avg_cards"], cc["odds_cards_over"], cc["p_cards"], calculate_kelly_stake(prob, odds))
@@ -1296,7 +1336,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros estrictos de alta precisión para este rango.")
             return
 
-        # 🔄 ORDENAR DE MAYOR A MENOR PROBABILIDAD
         valid_predictions.sort(key=lambda x: x["probability"], reverse=True)
 
         for item in valid_predictions:
@@ -1422,14 +1461,14 @@ async def auto_settlement_background_task():
 async def background_subscription_checker(application):
     try:
         while True:
-            await asyncio.sleep(3600)  # Revisa cada 1 hora
+            await asyncio.sleep(3600)
             conn = get_db_connection()
             if not conn:
                 continue
             try:
                 tz_uy = timezone(timedelta(hours=-3))
                 now = datetime.now(tz_uy)
-                warning_threshold = now + timedelta(days=2)  # Faltan 2 días o menos
+                warning_threshold = now + timedelta(days=2)
 
                 with conn.cursor() as cur:
                     cur.execute(
@@ -1503,7 +1542,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con filtros estrictos y alta precisión en pronósticos...")
+    logger.info("Iniciando bot con búsqueda por nombre de equipo para VIP/Admin...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
