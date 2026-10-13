@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 import asyncio
 import math
@@ -98,20 +98,45 @@ def init_db():
     finally:
         conn.close()
 
-async def register_user_middleware(update: Update):
+async def register_user_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
+    admin_id = os.getenv("ADMIN_TELEGRAM_ID", "1588200613")
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO bot_users (telegram_id, username) 
-                    VALUES (%s, %s) 
-                    ON CONFLICT (telegram_id) DO UPDATE SET username = EXCLUDED.username;
-                """, (user.id, user.username or user.first_name))
-                conn.commit()
+                cur.execute("SELECT telegram_id FROM bot_users WHERE telegram_id = %s;", (user.id,))
+                exists = cur.fetchone()
+                
+                if not exists:
+                    cur.execute("""
+                        INSERT INTO bot_users (telegram_id, username) 
+                        VALUES (%s, %s);
+                    """, (user.id, user.username or user.first_name))
+                    conn.commit()
+                    
+                    if admin_id:
+                        alert_text = (
+                            "🔔 <b>¡Nuevo Usuario en el Bot!</b>\n\n"
+                            f"• <b>Nombre:</b> {user.first_name}\n"
+                            f"• <b>Alias:</b> @{user.username or 'Sin alias'}\n"
+                            f"• <b>ID:</b> <code>{user.id}</code>"
+                        )
+                        try:
+                            await context.bot.send_message(
+                                chat_id=int(admin_id),
+                                text=alert_text,
+                                parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error al enviar notificación de nuevo usuario: {e}")
+                else:
+                    cur.execute("""
+                        UPDATE bot_users SET username = %s WHERE telegram_id = %s;
+                    """, (user.username or user.first_name, user.id))
+                    conn.commit()
         except Exception as e:
             logger.error(f"Error registrando usuario: {e}")
         finally:
@@ -514,7 +539,7 @@ def calculate_kelly_stake(probability, odds):
 # ==========================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await register_user_middleware(update)
+    await register_user_middleware(update, context)
     user_id = update.effective_user.id
     
     if update.message:
@@ -556,7 +581,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.message or not update.message.text:
         return
         
-    await register_user_middleware(update)
+    await register_user_middleware(update, context)
     user_id = update.effective_user.id
     text = update.message.text.strip()
     is_vip = check_user_vip_status(user_id)
@@ -1454,7 +1479,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con selector de fecha para Top Value +EV...")
+    logger.info("Iniciando bot con alertas de nuevos usuarios...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
