@@ -204,9 +204,19 @@ def get_top_value_fecha_keyboard():
     pasado = hoy + timedelta(days=2)
     
     keyboard = [
-        [InlineKeyboardButton("📅 Top Value para hoy", callback_data=f"topval_{hoy.strftime('%Y-%m-%d')}")],
-        [InlineKeyboardButton("📅 Top Value para mañana", callback_data=f"topval_{mañana.strftime('%Y-%m-%d')}")],
-        [InlineKeyboardButton("📅 Top Value para pasado mañana", callback_data=f"topval_{pasado.strftime('%Y-%m-%d')}")]
+        [InlineKeyboardButton("📅 Top Value hoy", callback_data=f"topvaldate_{hoy.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Top Value mañana", callback_data=f"topvaldate_{mañana.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Top Value pasado mañana", callback_data=f"topvaldate_{pasado.strftime('%Y-%m-%d')}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_top_value_limit_keyboard(date_str: str):
+    keyboard = [
+        [
+            InlineKeyboardButton("Top 1", callback_data=f"topvalrun_{date_str}_1"),
+            InlineKeyboardButton("Top 2", callback_data=f"topvalrun_{date_str}_2"),
+            InlineKeyboardButton("Top 3", callback_data=f"topvalrun_{date_str}_3")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -402,7 +412,6 @@ async def generate_comprehensive_analytics(fix):
     home_name = teams.get("home", {}).get("name", "Local")
     away_name = teams.get("away", {}).get("name", "Visita")
 
-    # Obtener estadísticas, tabla y h2h en paralelo
     home_stats, away_stats, standings, h2h_matches = await asyncio.gather(
         fetch_team_statistics(home_id, league_id, season),
         fetch_team_statistics(away_id, league_id, season),
@@ -410,7 +419,6 @@ async def generate_comprehensive_analytics(fix):
         fetch_h2h_data(home_id, away_id)
     )
 
-    # Posición en tabla
     home_pos, away_pos = "N/A", "N/A"
     for row in standings:
         team_row_id = row.get("team", {}).get("id")
@@ -419,7 +427,6 @@ async def generate_comprehensive_analytics(fix):
         elif team_row_id == away_id:
             away_pos = row.get("rank", "N/A")
 
-    # Análisis H2H breve
     h2h_summary = "Sin antecedentes recientes directos."
     if h2h_matches:
         h2h_summary = f"{len(h2h_matches)} duelos directos previos analizados."
@@ -586,8 +593,8 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("🗓️ <b>Selecciona el rango de fecha para Córners & Tarjetas:</b>", parse_mode="HTML", reply_markup=get_fecha_selector_keyboard("catcorners"))
     elif "Top Value +EV" in text:
         await update.message.reply_text("🗓️ <b>Selecciona el día para Top Value:</b>", parse_mode="HTML", reply_markup=get_top_value_fecha_keyboard())
+        return
     else:
-        # BÚSQUEDA ESPECÍFICA POR NOMBRE DE EQUIPO CON ANÁLISIS ENRIQUECIDO
         if is_vip:
             search_query = text.lower()
             await update.message.reply_text(f"🔍 Analizando tabla, H2H y Poisson para <b>'{text}'</b>...", parse_mode="HTML")
@@ -645,6 +652,74 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data.split("_")
         prefix, selected_date, time_filter = parts[1], parts[2], parts[3] if len(parts) > 3 else "all"
         await query.message.edit_text("🎯 <b>Selecciona cuántos pronósticos deseas mostrar:</b>", parse_mode="HTML", reply_markup=get_limit_selector_keyboard(prefix, selected_date, time_filter))
+        return
+
+    elif data.startswith("topvaldate_"):
+        selected_date = data.split("_")[1]
+        await query.message.edit_text(
+            f"🎯 <b>Selecciona si deseas Top 1, Top 2 o Top 3 para el día {selected_date}:</b>",
+            parse_mode="HTML",
+            reply_markup=get_top_value_limit_keyboard(selected_date)
+        )
+        return
+
+    elif data.startswith("topvalrun_"):
+        parts = data.split("_")
+        selected_date = parts[1]
+        limit_num = int(parts[2])
+
+        await query.message.edit_text(f"🔍 <b>Buscando las mejores oportunidades (+EV) del día {selected_date}...</b>", parse_mode="HTML")
+        fixtures = await fetch_fixtures_from_api(selected_date)
+        if not fixtures:
+            await query.message.reply_text("⚠️ No se encontraron partidos para esa fecha.")
+            return
+
+        all_candidate_picks = []
+
+        for fix in fixtures:
+            fid = fix.get("fixture", {}).get("id", 0)
+            teams = fix.get("teams", {})
+            league = fix.get("league", {})
+            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
+            home = teams.get("home", {}).get("name", "Local")
+            away = teams.get("away", {}).get("name", "Visitante")
+            match_time = format_match_time(fix)
+            
+            analytics = await generate_comprehensive_analytics(fix)
+
+            markets_to_eval = [
+                ("MERCADO 1X2 (LOCAL)", analytics["market_1x2"]["p_home"], analytics["market_1x2"]["odds_home"], "1X2"),
+                ("MERCADO 1X2 (VISITA)", analytics["market_1x2"]["p_away"], analytics["market_1x2"]["odds_away"], "1X2"),
+                ("GOLES (OVER 2.5)", analytics["goals"]["p_over_25"], analytics["goals"]["odds_over"], "GOALS"),
+                ("AMBOS ANOTAN (BTTS)", analytics["goals"]["p_btts_yes"], analytics["goals"]["odds_btts_yes"], "GOALS"),
+                ("DOBLE OPORTUNIDAD", max(analytics["double_chance"]["p_1x"], analytics["double_chance"]["p_x2"]), analytics["double_chance"]["odds_1x"], "DC"),
+                ("HANDICAP ASIÁTICO", analytics["asian_handicap"]["p_ah"], analytics["asian_handicap"]["odds_ah"], "AH")
+            ]
+
+            for m_title, prob, odds, m_short in markets_to_eval:
+                ev = (prob * odds) - 1
+                if prob >= 0.52 and ev > 0.03:
+                    stake = calculate_kelly_stake(prob, odds)
+                    details = analytics["context"] + f"• 🎯 <b>Oportunidad Top:</b> Alta expectativa matemática detectada en {m_title}."
+                    card = format_enriched_card(f"TOP VALUE: {m_title}", league_info, home, away, match_time, details, odds, prob, stake, "Valor esperado positivo validado por Poisson y rendimiento.")
+                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_{m_short}")]])
+                    
+                    all_candidate_picks.append({
+                        "ev": ev,
+                        "probability": prob,
+                        "text": card,
+                        "reply_markup": btn
+                    })
+
+        if not all_candidate_picks:
+            await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros estrictos de valor esperado para esta fecha.")
+            return
+
+        all_candidate_picks.sort(key=lambda x: (x["ev"], x["probability"]), reverse=True)
+        top_picks = all_candidate_picks[:limit_num]
+
+        for item in top_picks:
+            await query.message.reply_text(item["text"], parse_mode="HTML", reply_markup=item["reply_markup"])
         return
 
     elif data.startswith("runload_"):
@@ -750,7 +825,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auto_settlement_background_task():
     while True:
         await asyncio.sleep(600)
-        # Lógica de auto-liquidación de pendientes
 
 async def post_init(application: Application):
     init_db()
@@ -768,7 +842,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con análisis enriquecido (Tabla, H2H y Poisson)...")
+    logger.info("Iniciando bot con selector de Top 1, Top 2 o Top 3 para Top Value...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
