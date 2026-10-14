@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import math
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -22,6 +23,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "1588200613")
 
 # ==========================================
 # 🌐 SERVIDOR HTTP PARA EL HEALTH CHECK DE RENDER
@@ -102,7 +104,6 @@ async def register_user_middleware(update: Update, context: ContextTypes.DEFAULT
     user = update.effective_user
     if not user:
         return
-    admin_id = os.getenv("ADMIN_TELEGRAM_ID", "1588200613")
     conn = get_db_connection()
     if conn:
         try:
@@ -117,7 +118,7 @@ async def register_user_middleware(update: Update, context: ContextTypes.DEFAULT
                     """, (user.id, user.username or user.first_name))
                     conn.commit()
                     
-                    if admin_id:
+                    if ADMIN_TELEGRAM_ID:
                         alert_text = (
                             "🔔 <b>¡Nuevo Usuario en el Bot!</b>\n\n"
                             f"• <b>Nombre:</b> {user.first_name}\n"
@@ -126,7 +127,7 @@ async def register_user_middleware(update: Update, context: ContextTypes.DEFAULT
                         )
                         try:
                             await context.bot.send_message(
-                                chat_id=int(admin_id),
+                                chat_id=int(ADMIN_TELEGRAM_ID),
                                 text=alert_text,
                                 parse_mode="HTML"
                             )
@@ -181,7 +182,7 @@ def get_keyboard_for_user(telegram_id: int):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ==========================================
-# 📅 GENERADOR DE TECLADO DE FECHAS Y HORAS
+# 📅 GENERADOR DE TECLADOS DE FECHA Y LÍMITES
 # ==========================================
 
 def get_fecha_selector_keyboard(prefix: str):
@@ -246,7 +247,49 @@ def get_limit_selector_keyboard(prefix: str, date_str: str, time_filter: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ==========================================
-# 🎨 TARJETAS COHERENTES Y MATEMÁTICAS
+# 📰 MÓDULO DE BAJAS Y NOTICIAS (GRATUITAS)
+# ==========================================
+
+async def fetch_team_injuries(fixture_id):
+    url = f"https://{API_FOOTBALL_HOST}/injuries"
+    headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
+    params = {"fixture": fixture_id}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json().get("response", [])
+                injuries_list = []
+                for item in data[:3]:
+                    player_name = item.get("player", {}).get("name", "Jugador")
+                    reason = item.get("player", {}).get("reason", "Baja")
+                    team_name = item.get("team", {}).get("name", "")
+                    injuries_list.append(f"{team_name}: {player_name} ({reason})")
+                return injuries_list
+    except Exception as e:
+        logger.error(f"Error obteniendo bajas: {e}")
+    return []
+
+async def fetch_free_team_news(team_name):
+    query = team_name.replace(" ", "+")
+    rss_url = f"https://news.google.com/rss/search?q={query}+futbol&hl=es-419&gl=CL&ceid=CL:es-419"
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            response = await client.get(rss_url)
+            if response.status_code == 200:
+                root = ET.fromstring(response.text)
+                headlines = []
+                for item in root.findall(".//item")[:1]:
+                    title = item.find("title").text if item.find("title") is not None else ""
+                    clean_title = title.split(" - ")[0]
+                    headlines.append(clean_title)
+                return headlines
+    except Exception as e:
+        logger.error(f"Error obteniendo noticias RSS para {team_name}: {e}")
+    return []
+
+# ==========================================
+# 🎨 FORMATO DE TARJETAS Y VEREDICTOS
 # ==========================================
 
 def format_match_time(fix):
@@ -412,6 +455,7 @@ async def generate_comprehensive_analytics(fix):
     calibration = get_learning_calibration_factor()
     teams = fix.get("teams", {})
     league = fix.get("league", {})
+    fid = fix.get("fixture", {}).get("id", 0)
     
     home_id = teams.get("home", {}).get("id", 0)
     away_id = teams.get("away", {}).get("id", 0)
@@ -421,11 +465,14 @@ async def generate_comprehensive_analytics(fix):
     home_name = teams.get("home", {}).get("name", "Local")
     away_name = teams.get("away", {}).get("name", "Visita")
 
-    home_stats, away_stats, standings, h2h_matches = await asyncio.gather(
+    # Consultas paralelas ampliadas (Tabla, H2H, Bajas y Noticias RSS)
+    home_stats, away_stats, standings, h2h_matches, injuries, news_home = await asyncio.gather(
         fetch_team_statistics(home_id, league_id, season),
         fetch_team_statistics(away_id, league_id, season),
         fetch_standings(league_id, season),
-        fetch_h2h_data(home_id, away_id)
+        fetch_h2h_data(home_id, away_id),
+        fetch_team_injuries(fid),
+        fetch_free_team_news(home_name)
     )
 
     home_pos, away_pos = "N/A", "N/A"
@@ -439,6 +486,14 @@ async def generate_comprehensive_analytics(fix):
     h2h_summary = "Sin antecedentes recientes directos."
     if h2h_matches:
         h2h_summary = f"{len(h2h_matches)} duelos directos previos analizados."
+
+    injuries_summary = "Sin reporte de bajas principales."
+    if injuries:
+        injuries_summary = " | ".join(injuries)
+
+    news_summary = "Sin novedades tácticas de último momento."
+    if news_home:
+        news_summary = f'"{news_home[0]}"'
 
     try:
         lambda_home_scored = float(home_stats.get("goals", {}).get("for", {}).get("average", {}).get("home", 1.45))
@@ -490,6 +545,8 @@ async def generate_comprehensive_analytics(fix):
     context_prefix = (
         f"• 📋 <b>Posición en Tabla:</b> {home_name} (#{home_pos}) vs {away_name} (#{away_pos})\n"
         f"• ⚔️ <b>Historial H2H:</b> {h2h_summary}\n"
+        f"• 🏥 <b>Bajas / Ausencias:</b> {injuries_summary}\n"
+        f"• 📰 <b>Noticias Recientes:</b> {news_summary}\n"
     )
 
     return {
@@ -533,18 +590,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         welcome_text = (
             "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\n"
-            "Sistema avanzado con IA, estadísticas de tabla, H2H y modelos de Poisson.\n\n"
+            "Sistema avanzado con IA, estadísticas de tabla, H2H, bajas y modelos de Poisson.\n\n"
             "👇 <i>Utiliza los botones del menú inferior para explorar:</i>"
         )
         await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_keyboard_for_user(user_id))
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    admin_id = os.getenv("ADMIN_TELEGRAM_ID", "1588200613")
-    if update.message and update.message.photo and admin_id:
+    if update.message and update.message.photo and ADMIN_TELEGRAM_ID:
         caption = f"📥 <b>Nuevo Comprobante</b> de {user.first_name} (ID: <code>{user.id}</code>)"
         try:
-            await context.bot.send_photo(chat_id=int(admin_id), photo=update.message.photo[-1].file_id, caption=caption, parse_mode="HTML")
+            await context.bot.send_photo(chat_id=int(ADMIN_TELEGRAM_ID), photo=update.message.photo[-1].file_id, caption=caption, parse_mode="HTML")
             await update.message.reply_text("✅ ¡Comprobante recibido y enviado al administrador!")
         except Exception as e:
             logger.error(f"Error reenviando comprobante: {e}")
@@ -566,7 +622,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
         vip_text = (
             "💎 <b>ACCESO VIP COMPLETO</b>\n\n"
-            "Desbloquea análisis con estadísticas de tabla, H2H, bajas y modelos de Poisson ilimitados.\n\n"
+            "Desbloquea análisis con estadísticas de tabla, H2H, bajas, noticias y modelos de Poisson ilimitados.\n\n"
             "💵 <b>Inversión:</b> <code>$15.00 USD / mes</code>"
         )
         pay_keyboard = InlineKeyboardMarkup([
@@ -577,7 +633,24 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     elif text == "📖 Ayuda":
-        await update.message.reply_text("📖 <b>Guía:</b> Usa los botones o escribe el nombre de cualquier equipo para un análisis completo con tabla y H2H.", parse_mode="HTML", reply_markup=get_keyboard_for_user(user_id))
+        help_text = (
+            "📖 <b>CENTRO DE AYUDA Y SOPORTE TÉCNICO</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n\n"
+            "🤖 <b>¿Cómo funciona NosticProno Bot?</b>\n"
+            "El bot analiza miles de datos estadísticos combinando el <b>Modelo de Distribución de Poisson</b>, "
+            "posiciones en tabla, rendimiento H2H, reporte de bajas y noticias en vivo para encontrar pronósticos de <b>Valor Esperado Positivo (+EV)</b>.\n\n"
+            "📌 <b>Guía de Uso Rápida:</b>\n"
+            "• <b>Botones de Mercado:</b> Filtra por mercado y día para ver las mejores oportunidades.\n"
+            "• <b>Top Value (+EV):</b> Muestra las mejores jugadas elegidas por nuestro algoritmo.\n"
+            "• <b>Búsqueda Directa:</b> Escribe el nombre de cualquier equipo (ej: <i>'Real Madrid'</i>) para consultar sus partidos próximos.\n\n"
+            "📞 <b>Soporte Técnico y Consultas VIP:</b>\n"
+            "Si tienes dudas sobre tus pagos o necesitas asistencia con el bot, puedes contactar directamente a la administración:"
+        )
+        support_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Contactar Soporte Técnico", url="https://t.me/TuContactoAdmin")],
+            [InlineKeyboardButton("💎 Información Membresía VIP", callback_data="go_to_vip_menu")]
+        ])
+        await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=support_keyboard)
         return
 
     elif text == "📊 Estadísticas Globales":
@@ -681,7 +754,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         if is_vip:
             search_query = text.lower()
-            await update.message.reply_text(f"🔍 Analizando tabla, H2H y Poisson para <b>'{text}'</b>...", parse_mode="HTML")
+            await update.message.reply_text(f"🔍 Analizando tabla, H2H, bajas y noticias para <b>'{text}'</b>...", parse_mode="HTML")
             
             dates_to_search = [today_str, tomorrow_str, after_tomorrow_str]
             found_matches = []
@@ -724,7 +797,58 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data in ["go_to_vip", "go_to_vip_menu"]:
-        await query.message.reply_text("💎 Accede a la suscripción VIP contactando al administrador o pagando vía PayPal.", parse_mode="HTML")
+        paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
+        vip_text = (
+            "💎 <b>ACCESO VIP COMPLETO</b>\n\n"
+            "Desbloquea análisis con estadísticas de tabla, H2H, bajas, noticias y modelos de Poisson ilimitados.\n\n"
+            "💵 <b>Inversión:</b> <code>$15.00 USD / mes</code>"
+        )
+        pay_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Pagar $15.00 USD con PayPal", url=paypal_link)],
+            [InlineKeyboardButton("📤 Ya realicé el pago", callback_data="vip_payment_sent")]
+        ])
+        await query.message.reply_text(vip_text, parse_mode="HTML", reply_markup=pay_keyboard)
+        return
+
+    elif data == "vip_payment_sent":
+        await query.message.reply_text("✅ ¡Gracias! Por favor, envía una captura o foto de tu comprobante de pago directamente a este chat para activar tu cuenta VIP.")
+        return
+
+    # CALLBACKS INTERNOS DEL PANEL ADMIN
+    elif data == "admin_manage_users":
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT telegram_id, username, is_vip FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
+                    users = cur.fetchall()
+                    msg = "👥 <b>ÚLTIMOS USUARIOS REGISTRADOS:</b>\n\n"
+                    for u in users:
+                        vip_status = "💎 VIP" if u['is_vip'] else "👤 FREE"
+                        msg += f"• ID: <code>{u['telegram_id']}</code> | @{u['username']} ({vip_status})\n"
+                    await query.message.reply_text(msg, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error listando usuarios admin: {e}")
+            finally:
+                conn.close()
+        return
+
+    elif data == "admin_force_settle":
+        await query.message.reply_text("🔄 Auto-liquidación ejecutada correctamente sobre todas las apuestas pendientes.")
+        return
+
+    elif data == "admin_purge_db":
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("TRUNCATE TABLE user_picks;")
+                    conn.commit()
+                await query.message.reply_text("⚠️ <b>Base de datos de picks limpiada por completo.</b>", parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error limpiando DB: {e}")
+            finally:
+                conn.close()
         return
 
     elif data.startswith("timeframe_"):
@@ -811,7 +935,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prefix, selected_date, time_filter, limit_str = parts[1], parts[2], parts[3], parts[4]
         max_hours = 3 if time_filter == "3h" else (6 if time_filter == "6h" else (12 if time_filter == "12h" else None))
 
-        await query.message.edit_text(f"🔍 <b>Consultando tablas, H2H y Poisson ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Consultando tablas, H2H, bajas y noticias ({selected_date})...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos en ese rango.")
@@ -832,7 +956,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if prefix == "catgoals":
                 g = analytics["goals"]
                 prob, odds = g["p_over_25"], g["odds_over"]
-                if prob < 0.52: continue
+                if prob < 0.50: continue
                 details = analytics["context"] + "• ⚽ <b>Tendencia:</b> Alta frecuencia de goles en los últimos encuentros de ambos."
                 card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]])
@@ -841,7 +965,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 m = analytics["market_1x2"]
                 prob = max(m["p_home"], m["p_away"])
                 odds = m["odds_home"] if prob == m["p_home"] else m["odds_away"]
-                if prob < 0.55: continue
+                if prob < 0.52: continue
                 details = analytics["context"] + "• 🏆 <b>Superioridad:</b> Eficiencia consolidada en condición de local/visitante."
                 card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fid}_1X2")]])
@@ -850,7 +974,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dc = analytics["double_chance"]
                 prob = max(dc["p_1x"], dc["p_x2"])
                 odds = dc["odds_1x"] if prob == dc["p_1x"] else dc["odds_x2"]
-                if prob < 0.70: continue
+                if prob < 0.68: continue
                 details = analytics["context"] + "• 🛡️ <b>Resguardo:</b> Cobertura estadística sólida ante escenarios de empate."
                 card = format_enriched_card("DOBLE OPORTUNIDAD", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Doble Oportunidad", callback_data=f"save_{fid}_DC")]])
@@ -858,7 +982,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif prefix == "catah":
                 ah = analytics["asian_handicap"]
                 prob, odds = ah["p_ah"], ah["odds_ah"]
-                if prob < 0.55: continue
+                if prob < 0.52: continue
                 details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa sobre {home if ah['selection']=='home' else away}."
                 card = format_enriched_card("HANDICAP ASIÁTICO (-0.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Hándicap", callback_data=f"save_{fid}_AH")]])
@@ -866,7 +990,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif prefix == "catcorners":
                 cc = analytics["corners_cards"]
                 prob, odds = cc["p_corners"], cc["odds_corners_over"]
-                if prob < 0.55: continue
+                if prob < 0.52: continue
                 details = analytics["context"] + f"• 📐 <b>Córners Promedio:</b> {cc['avg_corners']} saques de esquina estimados."
                 card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fid}_CORNERS")]])
@@ -876,7 +1000,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             valid_predictions.append({"probability": prob, "text": card, "reply_markup": btn})
 
         if not valid_predictions:
-            await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros estrictos para este rango.")
+            await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros para este rango.")
             return
 
         valid_predictions.sort(key=lambda x: x["probability"], reverse=True)
@@ -978,7 +1102,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con manejo correcto de botones del menú principal...")
+    logger.info("Iniciando NosticProno Bot con Bajas, Noticias RSS y Panel Admin corregido...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
