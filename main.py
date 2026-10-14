@@ -192,8 +192,8 @@ def get_fecha_selector_keyboard(prefix: str):
     
     keyboard = [
         [InlineKeyboardButton("📅 Partidos de hoy", callback_data=f"timeframe_{prefix}")],
-        [InlineKeyboardButton("📅 Partidos de mañana", callback_data=f"loadfixtures_{prefix}_{mañana.strftime('%Y-%m-%d')}_all")],
-        [InlineKeyboardButton("📅 Partidos de pasado mañana", callback_data=f"loadfixtures_{prefix}_{pasado.strftime('%Y-%m-%d')}_all")]
+        [InlineKeyboardButton("📅 Partidos de mañana", callback_data=f"datechoice_{prefix}_{mañana.strftime('%Y-%m-%d')}")],
+        [InlineKeyboardButton("📅 Partidos de pasado mañana", callback_data=f"datechoice_{prefix}_{pasado.strftime('%Y-%m-%d')}")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -215,10 +215,23 @@ def get_timeframe_keyboard(prefix: str):
     hoy_str = datetime.now(tz).strftime('%Y-%m-%d')
     
     keyboard = [
-        [InlineKeyboardButton("⚡ Próximas 3 horas", callback_data=f"loadfixtures_{prefix}_{hoy_str}_3h")],
-        [InlineKeyboardButton("⏳ Próximas 6 horas", callback_data=f"loadfixtures_{prefix}_{hoy_str}_6h")],
-        [InlineKeyboardButton("🕒 Próximas 12 horas", callback_data=f"loadfixtures_{prefix}_{hoy_str}_12h")],
-        [InlineKeyboardButton("📅 Todos los partidos de hoy", callback_data=f"loadfixtures_{prefix}_{hoy_str}_all")]
+        [InlineKeyboardButton("⚡ Próximas 3 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_3h")],
+        [InlineKeyboardButton("⏳ Próximas 6 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_6h")],
+        [InlineKeyboardButton("🕒 Próximas 12 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_12h")],
+        [InlineKeyboardButton("📅 Todos los partidos de hoy", callback_data=f"datechoice_{prefix}_{hoy_str}_all")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_limit_selector_keyboard(prefix: str, date_str: str, time_filter: str):
+    keyboard = [
+        [
+            InlineKeyboardButton("Top 3", callback_data=f"runload_{prefix}_{date_str}_{time_filter}_3"),
+            InlineKeyboardButton("Top 5", callback_data=f"runload_{prefix}_{date_str}_{time_filter}_5")
+        ],
+        [
+            InlineKeyboardButton("Top 10", callback_data=f"runload_{prefix}_{date_str}_{time_filter}_10"),
+            InlineKeyboardButton("🔥 Todos los mejores", callback_data=f"runload_{prefix}_{date_str}_{time_filter}_all")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -283,7 +296,6 @@ def format_double_chance_card(league_info, home, away, match_time, p_1x, odds_1x
 
 def format_asian_handicap_card(league_info, home, away, match_time, selected_team, p_ah, odds_ah, stake_ah):
     team_name = home if selected_team == "home" else away
-    handicap_label = "Local (-0.5)" if selected_team == "home" else "Visitante (-0.5)"
     ev_ah = (p_ah * odds_ah) - 1
 
     return (
@@ -655,7 +667,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     restricted_triggers = ["1X2 / Ganador", "Goles & BTTS", "Doble Oportunidad", "Handicap Asiático", "Córners & Tarjetas", "Combinadas EV+", "Mis Estadísticas", "Top Value +EV", "Panel Admin"]
     
-    # Si NO es VIP y escribe texto libre o un disparador restringido, bloqueamos
     if not is_vip and (any(rt in text for rt in restricted_triggers) or len(text) > 2):
         paywall_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("💎 Obtener Acceso VIP ($15/mes)", callback_data="go_to_vip_menu")]
@@ -862,9 +873,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(admin_text, parse_mode="HTML", reply_markup=admin_keyboard)
 
     else:
-        # ==========================================
-        # 🔍 BÚSQUEDA ESPECÍFICA POR NOMBRE DE EQUIPO (VIP / ADMIN)
-        # ==========================================
         if is_vip:
             search_query = text.lower()
             await update.message.reply_text(f"🔍 Buscando partidos para <b>'{text}'</b> (hoy, mañana y pasado mañana)...", parse_mode="HTML")
@@ -885,7 +893,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text(f"⚠️ No se encontraron partidos programados para <b>'{text}'</b> en los próximos 3 días.", parse_mode="HTML")
                 return
 
-            for fix in found_matches[:5]:  # Limitar a máximo 5 resultados para no saturar
+            for fix in found_matches[:5]:
                 fid = fix.get("fixture", {}).get("id", 0)
                 teams = fix.get("teams", {})
                 league = fix.get("league", {})
@@ -943,9 +951,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("timeframe_"):
         prefix = data.split("_")[1]
         await query.message.edit_text(
-            "⏱️ <b>Selecciona el rango de tiempo deseado para hoy:</b>",
+            "⏱️ <b>Selecciona el rango de horario deseado para hoy:</b>",
             parse_mode="HTML",
             reply_markup=get_timeframe_keyboard(prefix)
+        )
+        return
+
+    elif data.startswith("datechoice_"):
+        parts = data.split("_")
+        prefix = parts[1]
+        selected_date = parts[2]
+        time_filter = parts[3] if len(parts) > 3 else "all"
+
+        await query.message.edit_text(
+            f"🎯 <b>Selecciona la cantidad de mejores pronósticos que deseas mostrar:</b>",
+            parse_mode="HTML",
+            reply_markup=get_limit_selector_keyboard(prefix, selected_date, time_filter)
         )
         return
 
@@ -1242,22 +1263,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 conn.close()
 
-    elif data.startswith("loadfixtures_"):
+    elif data.startswith("runload_"):
         parts = data.split("_")
         prefix = parts[1]
         selected_date = parts[2]
-        time_filter = parts[3] if len(parts) > 3 else "all"
+        time_filter = parts[3]
+        limit_str = parts[4]
 
         max_hours = None
         if time_filter == "3h": max_hours = 3
         elif time_filter == "6h": max_hours = 6
         elif time_filter == "12h": max_hours = 12
 
-        await query.message.edit_text(f"🔍 <b>Ejecutando escaneo estricto y filtrado de alta precisión ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Analizando partidos con filtros estrictos ({selected_date})...</b>", parse_mode="HTML")
         
         fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos con los filtros estrictos en ese rango de horas.")
+            await query.message.reply_text("⚠️ No se encontraron partidos con los filtros estrictos en ese rango de horario.")
             return
 
         valid_predictions = []
@@ -1336,7 +1358,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros estrictos de alta precisión para este rango.")
             return
 
+        # 🔄 ORDENAR DE MAYOR A MENOR PROBABILIDAD Y RECORTAR SEGÚN LA CANTIDAD ELEGIDA
         valid_predictions.sort(key=lambda x: x["probability"], reverse=True)
+        
+        if limit_str != "all":
+            limit_num = int(limit_str)
+            valid_predictions = valid_predictions[:limit_num]
 
         for item in valid_predictions:
             await query.message.reply_text(item["text"], parse_mode="HTML", reply_markup=item["reply_markup"])
@@ -1542,7 +1569,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con búsqueda por nombre de equipo para VIP/Admin...")
+    logger.info("Iniciando bot con selector de cantidad de mejores pronósticos...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
