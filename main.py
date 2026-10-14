@@ -1,4 +1,4 @@
-﻿import os
+import os
 import logging
 import asyncio
 import math
@@ -246,7 +246,7 @@ def get_limit_selector_keyboard(prefix: str, date_str: str, time_filter: str):
     return InlineKeyboardMarkup(keyboard)
 
 # ==========================================
-# 🎨 TARJETAS ENRIQUECIDAS CON CONTEXTO REAL
+# 🎨 TARJETAS COHERENTES Y MATEMÁTICAS
 # ==========================================
 
 def format_match_time(fix):
@@ -261,13 +261,22 @@ def format_match_time(fix):
     except Exception:
         return "00:00"
 
-def format_enriched_card(market_title, league_info, home, away, match_time, details_text, odds, prob, stake, verdict):
+def generate_coherent_verdict(prob, ev):
+    if ev >= 0.15 and prob >= 0.60:
+        return f"Alta divergencia matemática favorable. El modelo detecta un valor excelente (+{int(ev*100)}% EV) con sólida probabilidad real."
+    elif ev >= 0.08:
+        return f"Tendencia positiva moderada. Buen margen de rentabilidad esperada (+{int(ev*100)}% EV) respaldada por estadísticas."
+    else:
+        return f"Selección estricta de cumplimiento ajustado (+{int(ev*100)}% EV). Operar con gestión de bankroll conservadora."
+
+def format_enriched_card(market_title, league_info, home, away, match_time, details_text, odds, prob, stake):
     ev = (prob * odds) - 1
+    verdict = generate_coherent_verdict(prob, ev)
     return (
         f"🏆 <b>{home} vs {away}</b>\n"
         f"🌐 <i>{league_info}</i> | ⏰ <code>{match_time} HS</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>{market_title} (ANÁLISIS INTEGRAL)</b>\n\n"
+        f"📊 <b>{market_title} (ANÁLISIS COHERENTE)</b>\n\n"
         f"{details_text}\n"
         f"• 📈 <b>Probabilidad Real:</b> <code>{prob*100:.1f}%</code> | 📐 <b>Cuota:</b> <code>{odds:.2f}</code>\n"
         f"• 💎 <b>Valor Esperado (EV):</b> <code>+{int(ev*100)}%</code>\n\n"
@@ -572,10 +581,85 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     elif text == "📊 Estadísticas Globales":
-        await update.message.reply_text("📊 Sistema activo y calibrado con éxito.", reply_markup=get_keyboard_for_user(user_id))
+        await update.message.reply_text("📊 Sistema activo y calibrado con éxito.", parse_mode="HTML", reply_markup=get_keyboard_for_user(user_id))
         return
 
-    restricted_triggers = ["1X2 / Ganador", "Goles & BTTS", "Doble Oportunidad", "Handicap Asiático", "Córners & Tarjetas", "Combinadas EV+", "Mis Estadísticas", "Top Value +EV", "Panel Admin"]
+    elif text == "📊 Mis Estadísticas":
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE status IN ('WON', 'LOST');")
+                    res = cur.fetchone()
+                    total = res['total'] or 0
+                    wins = res['wins'] or 0
+                    hit_rate = (wins / total * 100) if total > 0 else 0
+                    factor = get_learning_calibration_factor()
+
+                    admin_keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 Gestionar / Ver mis Picks Guardados", callback_data="manage_picks_list")]
+                    ] if check_user_vip_status(user_id) else [])
+
+                    await update.message.reply_text(
+                        f"📊 <b>ESTADÍSTICAS & RENDIMIENTO AVANZADO</b>\n\n"
+                        f"• Apuestas Totales Liquidadas: <code>{total}</code>\n"
+                        f"• Aciertos Globales: <code>{wins} ({hit_rate:.1f}%)</code>\n"
+                        f"• Factor Calibración IA: <code>{factor:.2f}x</code>",
+                        parse_mode="HTML", reply_markup=admin_keyboard
+                    )
+            except Exception as e:
+                logger.error(f"Error consultando estadísticas: {e}")
+                await update.message.reply_text("❌ Error al consultar las estadísticas.")
+            finally:
+                conn.close()
+        return
+
+    elif text == "⚙️ Panel Admin":
+        conn = get_db_connection()
+        total_picks, pending_picks, won_picks, lost_picks, total_users = 0, 0, 0, 0, 0
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT 
+                            COUNT(*) as total, 
+                            SUM(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) as pending,
+                            SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as won,
+                            SUM(CASE WHEN status='LOST' THEN 1 ELSE 0 END) as lost
+                        FROM user_picks;
+                    """)
+                    res = cur.fetchone()
+                    total_picks = res['total'] or 0
+                    pending_picks = res['pending'] or 0
+                    won_picks = res['won'] or 0
+                    lost_picks = res['lost'] or 0
+
+                    cur.execute("SELECT COUNT(*) as total FROM bot_users;")
+                    total_users = cur.fetchone()['total'] or 0
+            except Exception as e:
+                logger.error(f"Error consultando panel admin: {e}")
+            finally:
+                conn.close()
+
+        admin_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 Gestionar Usuarios", callback_data="admin_manage_users")],
+            [InlineKeyboardButton("🔄 Forzar Auto-Liquidación", callback_data="admin_force_settle")],
+            [InlineKeyboardButton("📋 Listar Picks Registrados", callback_data="manage_picks_list")],
+            [InlineKeyboardButton("⚠️ Vaciar / Limpiar Base de Datos", callback_data="admin_purge_db")]
+        ])
+
+        admin_text = (
+            "⚙️ <b>PANEL DE ADMINISTRACIÓN GENERAL</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            f"• 👥 <b>Usuarios Registrados:</b> <code>{total_users}</code>\n"
+            f"• 🗄 <b>Total Picks en DB:</b> <code>{total_picks}</code>\n"
+            f"• ⏳ <b>Pendientes:</b> <code>{pending_picks}</code> | ✅ <b>Ganadas:</b> <code>{won_picks}</code> | ❌ <b>Perdidas:</b> <code>{lost_picks}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━"
+        )
+        await update.message.reply_text(admin_text, parse_mode="HTML", reply_markup=admin_keyboard)
+        return
+
+    restricted_triggers = ["1X2 / Ganador", "Goles & BTTS", "Doble Oportunidad", "Handicap Asiático", "Córners & Tarjetas", "Combinadas EV+", "Top Value +EV"]
     if not is_vip and (any(rt in text for rt in restricted_triggers) or len(text) > 2):
         paywall_kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Obtener Acceso VIP ($15/mes)", callback_data="go_to_vip_menu")]])
         await update.message.reply_text("🔒 <b>Contenido exclusivo para miembros VIP.</b> Adquiere tu membresía para desbloquear el sistema completo:", parse_mode="HTML", reply_markup=paywall_kb)
@@ -626,7 +710,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 m_1x2 = analytics["market_1x2"]
                 
                 details = analytics["context"] + f"• 🎯 <b>Pronóstico:</b> Victoria de {home} validada por solidez en casa."
-                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, m_1x2["odds_home"], m_1x2["p_home"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]), "Superioridad táctica y de rendimiento confirmada.")
+                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, m_1x2["odds_home"], m_1x2["p_home"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_1X2")]])
                 await update.message.reply_text(card, parse_mode="HTML", reply_markup=btn)
 
@@ -701,7 +785,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if prob >= 0.52 and ev > 0.03:
                     stake = calculate_kelly_stake(prob, odds)
                     details = analytics["context"] + f"• 🎯 <b>Oportunidad Top:</b> Alta expectativa matemática detectada en {m_title}."
-                    card = format_enriched_card(f"TOP VALUE: {m_title}", league_info, home, away, match_time, details, odds, prob, stake, "Valor esperado positivo validado por Poisson y rendimiento.")
+                    card = format_enriched_card(f"TOP VALUE: {m_title}", league_info, home, away, match_time, details, odds, prob, stake)
                     btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_{m_short}")]])
                     
                     all_candidate_picks.append({
@@ -750,7 +834,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob, odds = g["p_over_25"], g["odds_over"]
                 if prob < 0.52: continue
                 details = analytics["context"] + "• ⚽ <b>Tendencia:</b> Alta frecuencia de goles en los últimos encuentros de ambos."
-                card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds), "Ritmo ofensivo superior al promedio de la liga.")
+                card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]])
 
             elif prefix == "cat1x2":
@@ -759,7 +843,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 odds = m["odds_home"] if prob == m["p_home"] else m["odds_away"]
                 if prob < 0.55: continue
                 details = analytics["context"] + "• 🏆 <b>Superioridad:</b> Eficiencia consolidada en condición de local/visitante."
-                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds), "Poisson valida ventaja clara en el resultado final.")
+                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fid}_1X2")]])
 
             elif prefix == "catdc":
@@ -768,7 +852,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 odds = dc["odds_1x"] if prob == dc["p_1x"] else dc["odds_x2"]
                 if prob < 0.70: continue
                 details = analytics["context"] + "• 🛡️ <b>Resguardo:</b> Cobertura estadística sólida ante escenarios de empate."
-                card = format_enriched_card("DOBLE OPORTUNIDAD", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds), "Baja probabilidad de derrota para el favorito.")
+                card = format_enriched_card("DOBLE OPORTUNIDAD", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Doble Oportunidad", callback_data=f"save_{fid}_DC")]])
 
             elif prefix == "catah":
@@ -776,7 +860,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob, odds = ah["p_ah"], ah["odds_ah"]
                 if prob < 0.55: continue
                 details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa sobre {home if ah['selection']=='home' else away}."
-                card = format_enriched_card("HANDICAP ASIÁTICO (-0.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds), "Eliminación del empate con alta expectativa de valor.")
+                card = format_enriched_card("HANDICAP ASIÁTICO (-0.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Hándicap", callback_data=f"save_{fid}_AH")]])
 
             elif prefix == "catcorners":
@@ -784,7 +868,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob, odds = cc["p_corners"], cc["odds_corners_over"]
                 if prob < 0.55: continue
                 details = analytics["context"] + f"• 📐 <b>Córners Promedio:</b> {cc['avg_corners']} saques de esquina estimados."
-                card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds), "Presión constante por bandas y volumen ofensivo alto.")
+                card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
                 btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fid}_CORNERS")]])
             else:
                 continue
@@ -802,6 +886,58 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for item in valid_predictions:
             await query.message.reply_text(item["text"], parse_mode="HTML", reply_markup=item["reply_markup"])
         return
+
+    elif data == "manage_picks_list":
+        conn = get_db_connection()
+        if not conn:
+            await query.message.reply_text("⚠️ Base de datos no disponible.")
+            return
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, fixture_id, market_type, odds, status FROM user_picks ORDER BY id DESC LIMIT 8;")
+                picks = cur.fetchall()
+                if not picks:
+                    await query.message.reply_text("📭 No hay picks registrados en la base de datos.")
+                    return
+                for p in picks:
+                    pid, market, odds, status = p['id'], p['market_type'], p['odds'], p['status']
+                    status_emoji = "⏳" if status == "PENDING" else ("✅" if status == "WON" else "❌")
+                    row_kb = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Ganada", callback_data=f"pick_set_WON_{pid}"),
+                            InlineKeyboardButton("❌ Perdida", callback_data=f"pick_set_LOST_{pid}"),
+                            InlineKeyboardButton("🗑️ Borrar", callback_data=f"pick_del_{pid}")
+                        ]
+                    ])
+                    await query.message.reply_text(f"📌 <b>Pick ID:</b> <code>{pid}</code> | {status_emoji} Estado: <b>{status}</b>\n• Mercado: <code>{market}</code> (Cuota: <code>{odds}</code>)", parse_mode="HTML", reply_markup=row_kb)
+        except Exception as e:
+            logger.error(f"Error listando picks: {e}")
+            await query.message.reply_text("❌ Error al recuperar los picks.")
+        finally:
+            conn.close()
+
+    elif data.startswith("pick_set_") or data.startswith("pick_del_"):
+        parts = data.split("_")
+        if data.startswith("pick_set_"):
+            new_status, pid = parts[2], int(parts[3])
+            conn = get_db_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE user_picks SET status = %s WHERE id = %s", (new_status, pid))
+                    conn.commit()
+                conn.close()
+            await query.answer(f"✅ Pick #{pid} actualizado a {new_status}", show_alert=True)
+            await query.message.edit_text(f"✨ <b>Pick #{pid} actualizado exitosamente a:</b> <code>{new_status}</code>", parse_mode="HTML")
+        elif data.startswith("pick_del_"):
+            pid = int(parts[2])
+            conn = get_db_connection()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM user_picks WHERE id = %s", (pid,))
+                    conn.commit()
+                conn.close()
+            await query.answer(f"🗑️ Pick #{pid} eliminado", show_alert=True)
+            await query.message.edit_text(f"🗑 <b>Pick #{pid} eliminado de la base de datos.</b>", parse_mode="HTML")
 
     elif data.startswith("save_"):
         try:
@@ -842,7 +978,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando bot con selector de Top 1, Top 2 o Top 3 para Top Value...")
+    logger.info("Iniciando bot con manejo correcto de botones del menú principal...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
