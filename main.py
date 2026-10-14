@@ -465,7 +465,6 @@ async def generate_comprehensive_analytics(fix):
     home_name = teams.get("home", {}).get("name", "Local")
     away_name = teams.get("away", {}).get("name", "Visita")
 
-    # Consultas paralelas ampliadas (Tabla, H2H, Bajas y Noticias RSS)
     home_stats, away_stats, standings, h2h_matches, injuries, news_home = await asyncio.gather(
         fetch_team_statistics(home_id, league_id, season),
         fetch_team_statistics(away_id, league_id, season),
@@ -814,23 +813,85 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("✅ ¡Gracias! Por favor, envía una captura o foto de tu comprobante de pago directamente a este chat para activar tu cuenta VIP.")
         return
 
-    # CALLBACKS INTERNOS DEL PANEL ADMIN
+    # CALLBACKS INTERNOS DEL PANEL ADMIN (GESTIÓN DE USUARIOS Y DB)
     elif data == "admin_manage_users":
         conn = get_db_connection()
         if conn:
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT telegram_id, username, is_vip FROM bot_users ORDER BY joined_at DESC LIMIT 10;")
+                    cur.execute("SELECT telegram_id, username, is_vip, role FROM bot_users ORDER BY joined_at DESC LIMIT 8;")
                     users = cur.fetchall()
-                    msg = "👥 <b>ÚLTIMOS USUARIOS REGISTRADOS:</b>\n\n"
+                    if not users:
+                        await query.message.reply_text("📭 No hay usuarios registrados.")
+                        return
                     for u in users:
+                        uid = u['telegram_id']
+                        uname = u['username'] or 'Sin alias'
                         vip_status = "💎 VIP" if u['is_vip'] else "👤 FREE"
-                        msg += f"• ID: <code>{u['telegram_id']}</code> | @{u['username']} ({vip_status})\n"
-                    await query.message.reply_text(msg, parse_mode="HTML")
+                        role = u['role']
+                        
+                        user_kb = InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton("⭐ Alternar VIP", callback_data=f"adm_toggle_vip_{uid}"),
+                                InlineKeyboardButton("👑 Hacer Admin" if role != 'admin' else "👤 Quitar Admin", callback_data=f"adm_toggle_role_{uid}")
+                            ],
+                            [
+                                InlineKeyboardButton("🗑️ Eliminar Usuario", callback_data=f"adm_del_user_{uid}")
+                            ]
+                        ])
+                        await query.message.reply_text(
+                            f"👤 <b>Usuario:</b> @{uname}\n• ID: <code>{uid}</code>\n• Estado: <b>{vip_status}</b> | Rol: <b>{role}</b>",
+                            parse_mode="HTML",
+                            reply_markup=user_kb
+                        )
             except Exception as e:
                 logger.error(f"Error listando usuarios admin: {e}")
             finally:
                 conn.close()
+        return
+
+    elif data.startswith("adm_toggle_vip_"):
+        uid = int(data.split("_")[3])
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT is_vip FROM bot_users WHERE telegram_id = %s;", (uid,))
+                res = cur.fetchone()
+                if res:
+                    new_vip = not res['is_vip']
+                    cur.execute("UPDATE bot_users SET is_vip = %s WHERE telegram_id = %s;", (new_vip, uid))
+                    conn.commit()
+                    await query.answer(f"✅ Estatus VIP cambiado a: {new_vip}", show_alert=True)
+                    await query.message.edit_text(f"✨ Usuario <code>{uid}</code> actualizado. VIP: <b>{new_vip}</b>", parse_mode="HTML")
+            conn.close()
+        return
+
+    elif data.startswith("adm_toggle_role_"):
+        uid = int(data.split("_")[3])
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT role FROM bot_users WHERE telegram_id = %s;", (uid,))
+                res = cur.fetchone()
+                if res:
+                    new_role = "user" if res['role'] == "admin" else "admin"
+                    cur.execute("UPDATE bot_users SET role = %s WHERE telegram_id = %s;", (new_role, uid))
+                    conn.commit()
+                    await query.answer(f"✅ Rol cambiado a: {new_role}", show_alert=True)
+                    await query.message.edit_text(f"✨ Usuario <code>{uid}</code> actualizado. Rol: <b>{new_role}</b>", parse_mode="HTML")
+            conn.close()
+        return
+
+    elif data.startswith("adm_del_user_"):
+        uid = int(data.split("_")[3])
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM bot_users WHERE telegram_id = %s;", (uid,))
+                conn.commit()
+            conn.close()
+            await query.answer("🗑️ Usuario eliminado del sistema", show_alert=True)
+            await query.message.edit_text(f"🗑️ Usuario <code>{uid}</code> eliminado correctamente.", parse_mode="HTML")
         return
 
     elif data == "admin_force_settle":
@@ -1102,7 +1163,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo_message))
 
-    logger.info("Iniciando NosticProno Bot con Bajas, Noticias RSS y Panel Admin corregido...")
+    logger.info("Iniciando NosticProno Bot con gestión de usuarios completa y fuentes gratuitas...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
