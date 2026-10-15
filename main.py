@@ -78,6 +78,7 @@ def init_db():
                 );
             """)
             cur.execute("ALTER TABLE user_picks ADD COLUMN IF NOT EXISTS probability FLOAT;")
+            cur.execute("ALTER TABLE user_picks ADD COLUMN IF NOT EXISTS telegram_id BIGINT;")
             
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bot_users (
@@ -673,7 +674,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if conn:
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE status IN ('WON', 'LOST');")
+                    cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN status='WON' THEN 1 ELSE 0 END) as wins FROM user_picks WHERE telegram_id = %s AND status IN ('WON', 'LOST');", (user_id,))
                     res = cur.fetchone()
                     total = res['total'] or 0
                     wins = res['wins'] or 0
@@ -682,7 +683,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
                     admin_keyboard = InlineKeyboardMarkup([
                         [InlineKeyboardButton("📋 Gestionar / Ver mis Picks Guardados", callback_data="manage_picks_list")]
-                    ] if check_user_vip_status(user_id) else [])
+                    ] if check_user_vip_status(user_id) or True else [])
 
                     await update.message.reply_text(
                         f"📊 <b>ESTADÍSTICAS & RENDIMIENTO AVANZADO</b>\n\n"
@@ -793,9 +794,13 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 analytics = await generate_comprehensive_analytics(fix)
                 m_1x2 = analytics["market_1x2"]
                 
+                prob = m_1x2["p_home"]
+                odds = m_1x2["odds_home"]
+                stake = calculate_kelly_stake(prob, odds)
+                
                 details = analytics["context"] + f"• 🎯 <b>Pronóstico:</b> Victoria de {home} validada por solidez en casa."
-                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, m_1x2["odds_home"], m_1x2["p_home"], calculate_kelly_stake(m_1x2["p_home"], m_1x2["odds_home"]))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_1X2")]])
+                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
                 await update.message.reply_text(card, parse_mode="HTML", reply_markup=btn)
 
 # ==========================================
@@ -984,7 +989,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     stake = calculate_kelly_stake(prob, odds)
                     details = analytics["context"] + f"• 🎯 <b>Oportunidad Top:</b> Alta expectativa matemática detectada en {m_title}."
                     card = format_enriched_card(f"TOP VALUE: {m_title}", league_info, home, away, match_time, details, odds, prob, stake)
-                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_{m_short}")]])
+                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_{m_short}_{odds}_{prob}")]])
                     
                     all_candidate_picks.append({
                         "ev": ev,
@@ -1031,43 +1036,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 g = analytics["goals"]
                 prob, odds = g["p_over_25"], g["odds_over"]
                 if prob < 0.50: continue
+                stake = calculate_kelly_stake(prob, odds)
                 details = analytics["context"] + "• ⚽ <b>Tendencia:</b> Alta frecuencia de goles en los últimos encuentros de ambos."
-                card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS")]])
+                card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS_{odds}_{prob}")]])
 
             elif prefix == "cat1x2":
                 m = analytics["market_1x2"]
                 prob = max(m["p_home"], m["p_away"])
                 odds = m["odds_home"] if prob == m["p_home"] else m["odds_away"]
                 if prob < 0.52: continue
+                stake = calculate_kelly_stake(prob, odds)
                 details = analytics["context"] + "• 🏆 <b>Superioridad:</b> Eficiencia consolidada en condición de local/visitante."
-                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fid}_1X2")]])
+                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
 
             elif prefix == "catdc":
                 dc = analytics["double_chance"]
                 prob, odds = dc["probability"], dc["odds"]
                 sel_name = dc["selection"]
                 if prob < 0.65: continue
+                stake = calculate_kelly_stake(prob, odds)
                 details = analytics["context"] + f"• 🛡️ <b>Resguardo:</b> Cobertura estadística sólida para la opción <b>{sel_name}</b>."
-                card = format_enriched_card(f"DOBLE OPORTUNIDAD: {sel_name}", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {sel_name}", callback_data=f"save_{fid}_DC")]])
+                card = format_enriched_card(f"DOBLE OPORTUNIDAD: {sel_name}", league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {sel_name}", callback_data=f"save_{fid}_DC_{odds}_{prob}")]])
 
             elif prefix == "catah":
                 ah = analytics["asian_handicap"]
                 prob, odds = ah["p_ah"], ah["odds_ah"]
                 if prob < 0.52: continue
+                stake = calculate_kelly_stake(prob, odds)
                 details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa sobre {home if ah['selection']=='home' else away}."
-                card = format_enriched_card("HANDICAP ASIÁTICO (-0.5)", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Hándicap", callback_data=f"save_{fid}_AH")]])
+                card = format_enriched_card("HANDICAP ASIÁTICO (-0.5)", league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Hándicap", callback_data=f"save_{fid}_AH_{odds}_{prob}")]])
 
             elif prefix == "catcorners":
                 cc = analytics["corners_cards"]
                 prob, odds = cc["p_corners"], cc["odds_corners_over"]
                 if prob < 0.52: continue
+                stake = calculate_kelly_stake(prob, odds)
                 details = analytics["context"] + f"• 📐 <b>Córners Promedio:</b> {cc['avg_corners']} saques de esquina estimados."
-                card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fid}_CORNERS")]])
+                card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fid}_CORNERS_{odds}_{prob}")]])
             else:
                 continue
 
@@ -1086,13 +1096,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif data == "manage_picks_list":
+        user_id = query.from_user.id
         conn = get_db_connection()
         if not conn:
             await query.message.reply_text("⚠️ Base de datos no disponible.")
             return
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT id, fixture_id, market_type, odds, status FROM user_picks ORDER BY id DESC LIMIT 8;")
+                cur.execute("SELECT id, fixture_id, market_type, odds, status FROM user_picks WHERE telegram_id = %s ORDER BY id DESC LIMIT 8;", (user_id,))
                 picks = cur.fetchall()
                 if not picks:
                     await query.message.reply_text("📭 No hay picks registrados en la base de datos.")
@@ -1140,11 +1151,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("save_"):
         try:
             parts = data.split("_")
-            fid, market_type_short = int(parts[1]), parts[2]
+            fid = int(parts[1])
+            market_type_short = parts[2]
+            odds = float(parts[3]) if len(parts) > 3 else 1.85
+            prob = float(parts[4]) if len(parts) > 4 else 0.65
+            stake = calculate_kelly_stake(prob, odds)
+            user_id = query.from_user.id
+
             conn = get_db_connection()
             if conn:
                 with conn.cursor() as cur:
-                    cur.execute("INSERT INTO user_picks (fixture_id, market_type, odds, probability, stake) VALUES (%s, %s, %s, %s, %s)", (fid, market_type_short, 1.85, 0.65, 1.0))
+                    cur.execute(
+                        "INSERT INTO user_picks (fixture_id, market_type, odds, probability, stake, telegram_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (fid, market_type_short, odds, prob, stake, user_id)
+                    )
                     conn.commit()
                 conn.close()
             await query.answer("✅ ¡Pick guardado con éxito!", show_alert=True)
