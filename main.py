@@ -501,7 +501,6 @@ async def generate_comprehensive_analytics(fix):
         lambda_away_scored = float(away_stats.get("goals", {}).get("for", {}).get("average", {}).get("away", 1.15))
         lambda_away_conceded = float(away_stats.get("goals", {}).get("against", {}).get("average", {}).get("away", 1.35))
         
-        # Ponderación basada en la posición en tabla para evitar sobreestimar a equipos de bajo nivel con bajas
         pos_factor_home = 1.0
         pos_factor_away = 1.0
         try:
@@ -544,7 +543,6 @@ async def generate_comprehensive_analytics(fix):
     odds_x2 = round(margin / max(0.05, p_x2), 2)
     odds_12 = round(margin / max(0.05, p_12), 2)
 
-    # Selección inteligente de Doble Oportunidad
     dc_options = [
         ("1X (Local o Empate)", min(0.95, p_1x * calibration), odds_1x),
         ("X2 (Empate o Visita)", min(0.95, p_x2 * calibration), odds_x2),
@@ -603,7 +601,6 @@ def calculate_kelly_stake(probability, odds):
         b = odds - 1
         if b <= 0: return 0.0
         kelly = (b * probability - (1.0 - probability)) / b
-        # Fractional Kelly (20% del valor) limitado estrictamente a un máximo de 5% para proteger el bankroll
         fractional_kelly = (kelly * 0.20) * 100
         return round(max(0.5, min(5.0, fractional_kelly)), 2)
     except Exception:
@@ -1026,13 +1023,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif prefix == "cat1x2":
                 m = analytics["market_1x2"]
-                prob = max(m["p_home"], m["p_away"])
-                odds = m["odds_home"] if prob == m["p_home"] else m["odds_away"]
+                is_home_fav = m["p_home"] >= m["p_away"]
+                prob = m["p_home"] if is_home_fav else m["p_away"]
+                odds = m["odds_home"] if is_home_fav else m["odds_away"]
+                team_selected = home if is_home_fav else away
                 if prob < 0.52: continue
                 stake = calculate_kelly_stake(prob, odds)
-                details = analytics["context"] + "• 🏆 <b>Superioridad:</b> Eficiencia consolidada en condición de local/visitante."
-                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar 1X2", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
+                details = analytics["context"] + f"• 🏆 <b>Superioridad:</b> Eficiencia consolidada de {team_selected} para llevarse el encuentro."
+                title_1x2 = f"GANADOR: {team_selected.upper()}"
+                card = format_enriched_card(title_1x2, league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {team_selected}", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
 
             elif prefix == "catdc":
                 dc = analytics["double_chance"]
@@ -1049,9 +1049,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob, odds = ah["p_ah"], ah["odds_ah"]
                 if prob < 0.52: continue
                 stake = calculate_kelly_stake(prob, odds)
-                details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa sobre {home if ah['selection']=='home' else away}."
-                card = format_enriched_card("HANDICAP ASIÁTICO (-0.5)", league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Hándicap", callback_data=f"save_{fid}_AH_{odds}_{prob}")]])
+                team_selected = home if ah['selection'] == 'home' else away
+                line_title = f"HANDICAP ASIÁTICO: {team_selected.upper()} -0.5"
+                details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa a favor de {team_selected}."
+                card = format_enriched_card(line_title, league_info, home, away, match_time, details, odds, prob, stake)
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {team_selected} -0.5", callback_data=f"save_{fid}_AH_{odds}_{prob}")]])
 
             elif prefix == "catcorners":
                 cc = analytics["corners_cards"]
