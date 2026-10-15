@@ -177,8 +177,8 @@ def get_keyboard_for_user(telegram_id: int):
         ]
     else:
         keyboard = [
-            [KeyboardButton("💎 Suscripción VIP"), KeyboardButton("📖 Ayuda")],
-            [KeyboardButton("📊 Estadísticas Globales")]
+            [KeyboardButton("💎 Solicitar Acceso VIP"), KeyboardButton("💬 Contactar Soporte")],
+            [KeyboardButton("📖 Ayuda"), KeyboardButton("📊 Estadísticas Globales")]
         ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -501,12 +501,27 @@ async def generate_comprehensive_analytics(fix):
         lambda_away_scored = float(away_stats.get("goals", {}).get("for", {}).get("average", {}).get("away", 1.15))
         lambda_away_conceded = float(away_stats.get("goals", {}).get("against", {}).get("average", {}).get("away", 1.35))
         
-        lambda_home = round((lambda_home_scored + lambda_away_conceded) / 2.0, 2)
-        lambda_away = round((lambda_away_scored + lambda_home_conceded) / 2.0, 2)
+        # Ponderación basada en la posición en tabla para evitar sobreestimar a equipos de bajo nivel con bajas
+        pos_factor_home = 1.0
+        pos_factor_away = 1.0
+        try:
+            if str(home_pos).isdigit() and str(away_pos).isdigit():
+                hp, ap = int(home_pos), int(away_pos)
+                if hp > ap + 10:
+                    pos_factor_home = 0.8
+                    pos_factor_away = 1.2
+                elif ap > hp + 10:
+                    pos_factor_home = 1.2
+                    pos_factor_away = 0.8
+        except Exception:
+            pass
+
+        lambda_home = round(((lambda_home_scored + lambda_away_conceded) / 2.0) * pos_factor_home, 2)
+        lambda_away = round(((lambda_away_scored + lambda_home_conceded) / 2.0) * pos_factor_away, 2)
     except Exception:
         lambda_home, lambda_away = 1.45, 1.15
 
-    lambda_home, lambda_away = max(0.5, lambda_home), max(0.5, lambda_away)
+    lambda_home, lambda_away = max(0.4, lambda_home), max(0.4, lambda_away)
     poisson_res = calculate_match_probabilities(lambda_home, lambda_away)
     
     p_home = poisson_res["p_home"]
@@ -588,7 +603,9 @@ def calculate_kelly_stake(probability, odds):
         b = odds - 1
         if b <= 0: return 0.0
         kelly = (b * probability - (1.0 - probability)) / b
-        return round(max(0.0, kelly * 100), 2)
+        # Fractional Kelly (20% del valor) limitado estrictamente a un máximo de 5% para proteger el bankroll
+        fractional_kelly = (kelly * 0.20) * 100
+        return round(max(0.5, min(5.0, fractional_kelly)), 2)
     except Exception:
         return 1.0
 
@@ -600,11 +617,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_middleware(update, context)
     user_id = update.effective_user.id
     if update.message:
-        welcome_text = (
-            "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\n"
-            "Sistema avanzado con IA, estadísticas de tabla, H2H, bajas y modelos de Poisson.\n\n"
-            "👇 <i>Utiliza los botones del menú inferior para explorar:</i>"
-        )
+        is_vip = check_user_vip_status(user_id)
+        if is_vip:
+            welcome_text = (
+                "⚽ <b>¡Bienvenido de vuelta a NosticProno Bot!</b>\n\n"
+                "Tu membresía VIP está activa. Explora los mercados avanzados abajo:"
+            )
+        else:
+            welcome_text = (
+                "⚽ <b>¡Bienvenido a NosticProno Bot!</b>\n\n"
+                "Sistema avanzado con IA, estadísticas de tabla, H2H, bajas y modelos de Poisson.\n\n"
+                "💎 <i>Estás en modo de prueba. Solicita acceso VIP para desbloquear todo el potencial:</i>"
+            )
         await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=get_keyboard_for_user(user_id))
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -630,7 +654,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     tomorrow_str = (datetime.now(tz_uy) + timedelta(days=1)).strftime("%Y-%m-%d")
     after_tomorrow_str = (datetime.now(tz_uy) + timedelta(days=2)).strftime("%Y-%m-%d")
 
-    if text == "💎 Suscripción VIP":
+    if text in ["💎 Suscripción VIP", "💎 Solicitar Acceso VIP"]:
         paypal_link = "https://www.paypal.com/ncp/payment/Q74JNDXBW5X3U"
         vip_text = (
             "💎 <b>ACCESO VIP COMPLETO</b>\n\n"
@@ -644,7 +668,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(vip_text, parse_mode="HTML", reply_markup=pay_keyboard)
         return
 
-    elif text == "📖 Ayuda":
+    elif text in ["📖 Ayuda", "💬 Contactar Soporte"]:
         help_text = (
             "📖 <b>CENTRO DE AYUDA Y SOPORTE TÉCNICO</b>\n"
             "━━━━━━━━━━━━━━━━━━━\n\n"
@@ -653,8 +677,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "posiciones en tabla, rendimiento H2H, reporte de bajas y noticias en vivo para encontrar pronósticos de <b>Valor Esperado Positivo (+EV)</b>.\n\n"
             "📌 <b>Guía de Uso Rápida:</b>\n"
             "• <b>Botones de Mercado:</b> Filtra por mercado y día para ver las mejores oportunidades.\n"
-            "• <b>Top Value (+EV):</b> Muestra las mejores jugadas elegidas por nuestro algoritmo.\n"
-            "• <b>Búsqueda Directa:</b> Escribe el nombre de cualquier equipo (ej: <i>'Real Madrid'</i>) para consultar sus partidos próximos.\n\n"
+            "• <b>Top Value (+EV):</b> Muestra las mejores jugadas elegidas por nuestro algoritmo.\n\n"
             "📞 <b>Soporte Técnico y Consultas VIP:</b>\n"
             "Si tienes dudas sobre tus pagos o necesitas asistencia con el bot, puedes contactar directamente a la administración:"
         )
@@ -763,45 +786,6 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif "Top Value +EV" in text:
         await update.message.reply_text("🗓️ <b>Selecciona el día para Top Value:</b>", parse_mode="HTML", reply_markup=get_top_value_fecha_keyboard())
         return
-    else:
-        if is_vip:
-            search_query = text.lower()
-            await update.message.reply_text(f"🔍 Analizando tabla, H2H, bajas y noticias para <b>'{text}'</b>...", parse_mode="HTML")
-            
-            dates_to_search = [today_str, tomorrow_str, after_tomorrow_str]
-            found_matches = []
-            for d_str in dates_to_search:
-                fixtures = await fetch_fixtures_from_api(d_str)
-                for fix in fixtures:
-                    h_name = fix.get("teams", {}).get("home", {}).get("name", "").lower()
-                    a_name = fix.get("teams", {}).get("away", {}).get("name", "").lower()
-                    if search_query in h_name or search_query in a_name:
-                        found_matches.append(fix)
-
-            if not found_matches:
-                await update.message.reply_text(f"⚠️ No se encontraron partidos para <b>'{text}'</b> en los próximos 3 días.", parse_mode="HTML")
-                return
-
-            for fix in found_matches[:3]:
-                fid = fix.get("fixture", {}).get("id", 0)
-                teams = fix.get("teams", {})
-                league = fix.get("league", {})
-                league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-                home = teams.get("home", {}).get("name", "Local")
-                away = teams.get("away", {}).get("name", "Visitante")
-                match_time = format_match_time(fix)
-                
-                analytics = await generate_comprehensive_analytics(fix)
-                m_1x2 = analytics["market_1x2"]
-                
-                prob = m_1x2["p_home"]
-                odds = m_1x2["odds_home"]
-                stake = calculate_kelly_stake(prob, odds)
-                
-                details = analytics["context"] + f"• 🎯 <b>Pronóstico:</b> Victoria de {home} validada por solidez en casa."
-                card = format_enriched_card("MERCADO 1X2 / GANADOR", league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
-                await update.message.reply_text(card, parse_mode="HTML", reply_markup=btn)
 
 # ==========================================
 # 🎛️ MANEJADOR DE CALLBACKS
@@ -830,7 +814,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("✅ ¡Gracias! Por favor, envía una captura o foto de tu comprobante de pago directamente a este chat para activar tu cuenta VIP.")
         return
 
-    # CALLBACKS INTERNOS DEL PANEL ADMIN (GESTIÓN DE USUARIOS Y DB)
     elif data == "admin_manage_users":
         conn = get_db_connection()
         if conn:
