@@ -515,10 +515,7 @@ async def generate_comprehensive_analytics(fix):
     p_btts = min(0.95, poisson_res["p_btts"] * calibration)
     p_1x = min(0.95, p_home + p_draw)
     p_x2 = min(0.95, p_away + p_draw)
-
-    non_draw_total = max(0.1, (p_home + p_away))
-    p_ah_home = min(0.92, max(0.10, round(p_home / non_draw_total, 3) * calibration))
-    p_ah_away = min(0.92, max(0.10, round(p_away / non_draw_total, 3) * calibration))
+    p_12 = min(0.95, p_home + p_away)
 
     margin = 1.05
     odds_home = round(margin / max(0.05, p_home), 2)
@@ -526,9 +523,24 @@ async def generate_comprehensive_analytics(fix):
     odds_away = round(margin / max(0.05, p_away), 2)
     odds_over = round(margin / max(0.05, p_over), 2)
     odds_btts = round(margin / max(0.05, p_btts), 2)
+    
     odds_1x = round(margin / max(0.05, p_1x), 2)
     odds_x2 = round(margin / max(0.05, p_x2), 2)
-    
+    odds_12 = round(margin / max(0.05, p_12), 2)
+
+    # Selección inteligente de Doble Oportunidad
+    dc_options = [
+        ("1X (Local o Empate)", min(0.95, p_1x * calibration), odds_1x),
+        ("X2 (Empate o Visita)", min(0.95, p_x2 * calibration), odds_x2),
+        ("12 (Local o Visita)", min(0.95, p_12 * calibration), odds_12)
+    ]
+    dc_options.sort(key=lambda x: x[1], reverse=True)
+    best_dc_name, best_dc_prob, best_dc_odds = dc_options[0]
+
+    non_draw_total = max(0.1, (p_home + p_away))
+    p_ah_home = min(0.92, max(0.10, round(p_home / non_draw_total, 3) * calibration))
+    p_ah_away = min(0.92, max(0.10, round(p_away / non_draw_total, 3) * calibration))
+
     odds_ah_home = round(margin / max(0.05, p_ah_home), 2)
     odds_ah_away = round(margin / max(0.05, p_ah_away), 2)
 
@@ -560,7 +572,7 @@ async def generate_comprehensive_analytics(fix):
             "p_away": p_away, "odds_away": odds_away
         },
         "double_chance": {
-            "p_1x": p_1x, "odds_1x": odds_1x, "p_x2": p_x2, "odds_x2": odds_x2
+            "selection": best_dc_name, "probability": best_dc_prob, "odds": best_dc_odds
         },
         "asian_handicap": {
             "selection": ah_selection, "p_ah": p_ah_final, "odds_ah": odds_ah_final
@@ -955,13 +967,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match_time = format_match_time(fix)
             
             analytics = await generate_comprehensive_analytics(fix)
+            dc = analytics["double_chance"]
 
             markets_to_eval = [
                 ("MERCADO 1X2 (LOCAL)", analytics["market_1x2"]["p_home"], analytics["market_1x2"]["odds_home"], "1X2"),
                 ("MERCADO 1X2 (VISITA)", analytics["market_1x2"]["p_away"], analytics["market_1x2"]["odds_away"], "1X2"),
                 ("GOLES (OVER 2.5)", analytics["goals"]["p_over_25"], analytics["goals"]["odds_over"], "GOALS"),
                 ("AMBOS ANOTAN (BTTS)", analytics["goals"]["p_btts_yes"], analytics["goals"]["odds_btts_yes"], "GOALS"),
-                ("DOBLE OPORTUNIDAD", max(analytics["double_chance"]["p_1x"], analytics["double_chance"]["p_x2"]), analytics["double_chance"]["odds_1x"], "DC"),
+                (f"DOBLE OPORTUNIDAD: {dc['selection']}", dc["probability"], dc["odds"], "DC"),
                 ("HANDICAP ASIÁTICO", analytics["asian_handicap"]["p_ah"], analytics["asian_handicap"]["odds_ah"], "AH")
             ]
 
@@ -1033,12 +1046,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif prefix == "catdc":
                 dc = analytics["double_chance"]
-                prob = max(dc["p_1x"], dc["p_x2"])
-                odds = dc["odds_1x"] if prob == dc["p_1x"] else dc["odds_x2"]
-                if prob < 0.68: continue
-                details = analytics["context"] + "• 🛡️ <b>Resguardo:</b> Cobertura estadística sólida ante escenarios de empate."
-                card = format_enriched_card("DOBLE OPORTUNIDAD", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Doble Oportunidad", callback_data=f"save_{fid}_DC")]])
+                prob, odds = dc["probability"], dc["odds"]
+                sel_name = dc["selection"]
+                if prob < 0.65: continue
+                details = analytics["context"] + f"• 🛡️ <b>Resguardo:</b> Cobertura estadística sólida para la opción <b>{sel_name}</b>."
+                card = format_enriched_card(f"DOBLE OPORTUNIDAD: {sel_name}", league_info, home, away, match_time, details, odds, prob, calculate_kelly_stake(prob, odds))
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {sel_name}", callback_data=f"save_{fid}_DC")]])
 
             elif prefix == "catah":
                 ah = analytics["asian_handicap"]
