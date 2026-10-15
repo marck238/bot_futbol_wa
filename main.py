@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 import asyncio
 import math
@@ -330,48 +330,96 @@ def format_enriched_card(market_title, league_info, home, away, match_time, deta
     )
 
 # ==========================================
-# 🧠 CONSULTAS DE ESTADÍSTICAS, TABLA Y H2H
+# 🚀 OPTIMIZACIÓN: CACHÉ Y SEMÁFORO DE MEMORIA
+# ==========================================
+
+API_CACHE = {}
+CACHE_TTL_SECONDS = 7200  # 2 horas
+
+def get_cached_data(key: str):
+    if key in API_CACHE:
+        data, timestamp = API_CACHE[key]
+        if (datetime.now(timezone.utc) - timestamp).total_seconds() < CACHE_TTL_SECONDS:
+            return data
+        else:
+            del API_CACHE[key]
+    return None
+
+def set_cached_data(key: str, data):
+    API_CACHE[key] = (data, datetime.now(timezone.utc))
+
+CONCURRENCY_SEMAPHORE = asyncio.Semaphore(5)
+
+# ==========================================
+# 🧠 CONSULTAS DE ESTADÍSTICAS, TABLA Y H2H (OPTIMIZADAS)
 # ==========================================
 
 async def fetch_team_statistics(team_id, league_id, season="2026"):
+    cache_key = f"stats_{team_id}_{league_id}_{season}"
+    cached = get_cached_data(cache_key)
+    if cached is not None:
+        return cached
+
     url = f"https://{API_FOOTBALL_HOST}/teams/statistics"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"team": team_id, "league": league_id, "season": season}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-            if response.status_code == 200:
-                return response.json().get("response", {})
-    except Exception as e:
-        logger.error(f"Error obteniendo estadísticas del equipo {team_id}: {e}")
+    
+    async with CONCURRENCY_SEMAPHORE:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                if response.status_code == 200:
+                    res_data = response.json().get("response", {})
+                    set_cached_data(cache_key, res_data)
+                    return res_data
+        except Exception as e:
+            logger.error(f"Error obteniendo estadísticas del equipo {team_id}: {e}")
     return {}
 
 async def fetch_standings(league_id, season="2026"):
+    cache_key = f"standings_{league_id}_{season}"
+    cached = get_cached_data(cache_key)
+    if cached is not None:
+        return cached
+
     url = f"https://{API_FOOTBALL_HOST}/standings"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"league": league_id, "season": season}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-            if response.status_code == 200:
-                data = response.json().get("response", [])
-                if data:
-                    return data[0].get("league", {}).get("standings", [[]])[0]
-    except Exception as e:
-        logger.error(f"Error obteniendo standings: {e}")
+    
+    async with CONCURRENCY_SEMAPHORE:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                if response.status_code == 200:
+                    data = response.json().get("response", [])
+                    if data:
+                        res_data = data[0].get("league", {}).get("standings", [[]])[0]
+                        set_cached_data(cache_key, res_data)
+                        return res_data
+        except Exception as e:
+            logger.error(f"Error obteniendo standings: {e}")
     return []
 
 async def fetch_h2h_data(home_id, away_id):
+    cache_key = f"h2h_{home_id}_{away_id}"
+    cached = get_cached_data(cache_key)
+    if cached is not None:
+        return cached
+
     url = f"https://{API_FOOTBALL_HOST}/fixtures/h2h"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"h2h": f"{home_id}-{away_id}", "last": "5"}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, headers=headers, params=params)
-            if response.status_code == 200:
-                return response.json().get("response", [])
-    except Exception as e:
-        logger.error(f"Error obteniendo H2H: {e}")
+    
+    async with CONCURRENCY_SEMAPHORE:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                if response.status_code == 200:
+                    res_data = response.json().get("response", [])
+                    set_cached_data(cache_key, res_data)
+                    return res_data
+        except Exception as e:
+            logger.error(f"Error obteniendo H2H: {e}")
     return []
 
 def get_learning_calibration_factor():
