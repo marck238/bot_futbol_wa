@@ -454,7 +454,7 @@ async def fetch_fixtures_from_api(date_str, max_hours=None):
     params = {"date": date_str, "timezone": "America/Montevideo"}
     
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(url, headers=headers, params=params)
             if response.status_code == 200:
                 fixtures = response.json().get("response", [])
@@ -464,14 +464,16 @@ async def fetch_fixtures_from_api(date_str, max_hours=None):
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
                     date_iso = fix.get("fixture", {}).get("date")
                     
-                    # 🚀 FLEXIBILIZAR ESTADOS: Aceptar 'NS' (Not Started) y 'TBD' (Time To Be Defined)
-                    if status_short in ["NS", "TBD"] and date_iso:
+                    if status_short in ["NS", "TBD", "PST"] and date_iso:
                         active_fixtures.append(fix)
-                        
-                logger.info(f"Partidos encontrados para {date_str}: {len(active_fixtures)} válidos para análisis.")
-                return active_fixtures if active_fixtures else []
+                
+                # 🚀 BLINDAJE CRÍCTICO: Limitar a máximo 20 partidos para evitar bloqueos en fechas futuras
+                active_fixtures = active_fixtures[:20]
+                
+                logger.info(f"Partidos filtrados para {date_str}: {len(active_fixtures)} analizables.")
+                return active_fixtures
     except Exception as e:
-        logger.error(f"Error consultando API-Football: {e}")
+        logger.error(f"Error consultando API-Football fixtures: {e}")
     return []
 
 def poisson_probability(lmbda, k):
@@ -990,7 +992,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         all_candidate_picks = []
 
         # 🚀 PROCESAMIENTO POR LOTES OPTIMIZADO PARA TOP VALUE
-        batch_size = 10
+        batch_size = 5
         for i in range(0, len(fixtures), batch_size):
             batch = fixtures[i:i + batch_size]
             batch_tasks = [generate_comprehensive_analytics(fix) for fix in batch]
@@ -1053,16 +1055,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prefix, selected_date, time_filter, limit_str = parts[1], parts[2], parts[3], parts[4]
         max_hours = 3 if time_filter == "3h" else (6 if time_filter == "6h" else (12 if time_filter == "12h" else None))
 
-        await query.message.edit_text(f"🔍 <b>Escaneando partidos por lotes ({selected_date})... esto asegurará estabilidad en el servidor.</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Escaneando de forma segura ({selected_date})... un momento.</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos en ese rango.")
+            await query.message.reply_text("⚠️ No se encontraron partidos disponibles o con datos suficientes para esa fecha.")
             return
 
         valid_predictions = []
         
-        # 🚀 DIVIDIR EN LOTES DE 10 PARTIDOS MÁXIMO PARA PROTEGER LA RAM DE RENDER
-        batch_size = 10
+        # 🚀 PROCESAMIENTO POR LOTES BLINDADO (5 EN 5)
+        batch_size = 5
         for i in range(0, len(fixtures), batch_size):
             batch = fixtures[i:i + batch_size]
             
@@ -1146,7 +1148,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             gc.collect()
 
         if not valid_predictions:
-            await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros para este rango.")
+            await query.message.reply_text("ℹ️ No se encontraron pronósticos que cumplan con los filtros estrictos para esta fecha futura (es posible que las estadísticas de las ligas aún estén actualizándose en la API).")
             return
 
         valid_predictions.sort(key=lambda x: x["probability"], reverse=True)
