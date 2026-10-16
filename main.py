@@ -457,20 +457,16 @@ async def fetch_fixtures_from_api(date_str, max_hours=None):
             if response.status_code == 200:
                 fixtures = response.json().get("response", [])
                 active_fixtures = []
-                now_utc = datetime.now(timezone.utc)
-                
-                max_time_utc = None
-                if max_hours:
-                    max_time_utc = now_utc + timedelta(hours=max_hours)
                 
                 for fix in fixtures:
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
                     date_iso = fix.get("fixture", {}).get("date")
-                    if status_short == "NS" and date_iso:
-                        fix_dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
-                        if fix_dt > now_utc:
-                            if max_time_utc is None or fix_dt <= max_time_utc:
-                                active_fixtures.append(fix)
+                    
+                    # 🚀 FLEXIBILIZAR ESTADOS: Aceptar 'NS' (Not Started) y 'TBD' (Time To Be Defined)
+                    if status_short in ["NS", "TBD"] and date_iso:
+                        active_fixtures.append(fix)
+                        
+                logger.info(f"Partidos encontrados para {date_str}: {len(active_fixtures)} válidos para análisis.")
                 return active_fixtures if active_fixtures else []
     except Exception as e:
         logger.error(f"Error consultando API-Football: {e}")
