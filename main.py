@@ -225,15 +225,16 @@ def get_top_value_limit_keyboard(date_str: str):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# 🛠️ NUEVOS RANGOS HORARIOS NO SUPERPUESTOS
 def get_timeframe_keyboard(prefix: str):
     tz = timezone(timedelta(hours=-3))
     hoy_str = datetime.now(tz).strftime('%Y-%m-%d')
     
     keyboard = [
         [InlineKeyboardButton("⚡ Próximas 3 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_3h")],
-        [InlineKeyboardButton("⏳ Próximas 6 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_6h")],
-        [InlineKeyboardButton("🕒 Próximas 12 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_12h")],
-        [InlineKeyboardButton("📅 Todos los partidos de hoy", callback_data=f"datechoice_{prefix}_{hoy_str}_all")]
+        [InlineKeyboardButton("⏳ Entre 3 y 6 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_3_6h")],
+        [InlineKeyboardButton("🕒 Entre 6 y 12 horas", callback_data=f"datechoice_{prefix}_{hoy_str}_6_12h")],
+        [InlineKeyboardButton("📅 Todos los partidos del día", callback_data=f"datechoice_{prefix}_{hoy_str}_all")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -449,7 +450,8 @@ def get_learning_calibration_factor():
     finally:
         conn.close()
 
-async def fetch_fixtures_from_api(date_str, max_hours=None):
+# 🛠️ FILTRO HORARIO ESTRICTO NO SUPERPUESTO
+async def fetch_fixtures_from_api(date_str, time_filter="all"):
     url = f"https://{API_FOOTBALL_HOST}/fixtures"
     headers = {"x-rapidapi-key": API_FOOTBALL_KEY, "x-rapidapi-host": API_FOOTBALL_HOST}
     params = {"date": date_str, "timezone": "America/Montevideo"}
@@ -460,18 +462,32 @@ async def fetch_fixtures_from_api(date_str, max_hours=None):
             if response.status_code == 200:
                 fixtures = response.json().get("response", [])
                 active_fixtures = []
+                now_utc = datetime.now(timezone.utc)
                 
                 for fix in fixtures:
                     status_short = fix.get("fixture", {}).get("status", {}).get("short")
                     date_iso = fix.get("fixture", {}).get("date")
                     
                     if status_short in ["NS", "TBD", "PST"] and date_iso:
+                        if time_filter != "all":
+                            try:
+                                match_dt = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
+                                diff_hours = (match_dt - now_utc).total_seconds() / 3600.0
+                                
+                                if time_filter == "3h" and not (0 <= diff_hours <= 3):
+                                    continue
+                                elif time_filter == "3_6h" and not (3 < diff_hours <= 6):
+                                    continue
+                                elif time_filter == "6_12h" and not (6 < diff_hours <= 12):
+                                    continue
+                            except Exception:
+                                pass
                         active_fixtures.append(fix)
                 
-                # 🚀 CAPTURA EXACTA DE HASTA 80 PARTIDOS DEL DÍA SELECCIONADO
+                # 🚀 LÍMITE DE 80 PARTIDOS
                 active_fixtures = active_fixtures[:80]
                 
-                logger.info(f"Partidos filtrados para {date_str}: {len(active_fixtures)} analizables.")
+                logger.info(f"Partidos filtrados para {date_str} (filtro {time_filter}): {len(active_fixtures)} analizables.")
                 return active_fixtures
     except Exception as e:
         logger.error(f"Error consultando API-Football fixtures: {e}")
@@ -961,7 +977,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("timeframe_"):
         prefix = data.split("_")[1]
-        await query.message.edit_text("⏱️ <b>Selecciona el rango horario:</b>", parse_mode="HTML", reply_markup=get_timeframe_keyboard(prefix))
+        await query.message.edit_text("⏱️ <b>Selecciona la franja horaria:</b>", parse_mode="HTML", reply_markup=get_timeframe_keyboard(prefix))
         return
 
     elif data.startswith("datechoice_"):
@@ -984,8 +1000,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         selected_date = parts[1]
         limit_num = int(parts[2])
 
-        await query.message.edit_text(f"🔍 <b>Analizando hasta 80 partidos del día {selected_date} para extraer Top Value...</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date)
+        await query.message.edit_text(f"🔍 <b>Analizando partidos del día {selected_date} para extraer Top Value...</b>", parse_mode="HTML")
+        fixtures = await fetch_fixtures_from_api(selected_date, time_filter="all")
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos para esa fecha.")
             return
@@ -1053,17 +1069,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("runload_"):
         parts = data.split("_")
         prefix, selected_date, time_filter, limit_str = parts[1], parts[2], parts[3], parts[4]
-        max_hours = 3 if time_filter == "3h" else (6 if time_filter == "6h" else (12 if time_filter == "12h" else None))
 
-        await query.message.edit_text(f"🔍 <b>Analizando los mejores 80 partidos del día ({selected_date})... esto ordenará y arrojará los picks más sólidos.</b>", parse_mode="HTML")
-        fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
+        await query.message.edit_text(f"🔍 <b>Analizando partidos del día ({selected_date}) según franja horaria...</b>", parse_mode="HTML")
+        fixtures = await fetch_fixtures_from_api(selected_date, time_filter=time_filter)
         if not fixtures:
-            await query.message.reply_text("⚠️ No se encontraron partidos disponibles o con datos suficientes para esa fecha.")
+            await query.message.reply_text("⚠️ No se encontraron partidos disponibles en esta franja horaria.")
             return
 
         valid_predictions = []
         
-        # 🚀 ESCANEA HASTA 80 PARTIDOS EN BLOQUES SEGUROS Y EXTRAE LAS MEJORES OPORTUNIDADES
         batch_size = 5
         for i in range(0, len(fixtures), batch_size):
             batch = fixtures[i:i + batch_size]
@@ -1144,14 +1158,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Error procesando partido en lote: {match_err}")
                     continue
 
-            # 🧹 Forzar liberación de memoria RAM tras procesar cada lote
             gc.collect()
 
         if not valid_predictions:
-            await query.message.reply_text("ℹ️ No se encontraron pronósticos que cumplan con los filtros estrictos para esta fecha futura.")
+            await query.message.reply_text("ℹ️ No se encontraron pronósticos que cumplan con los filtros en esta franja horaria.")
             return
 
-        # 🎯 ORDENAR ESTRICTAMENTE POR LAS MEJORES PROBABILIDADES DEL DÍA
         valid_predictions.sort(key=lambda x: x["probability"], reverse=True)
         if limit_str != "all":
             valid_predictions = valid_predictions[:int(limit_str)]
@@ -1242,7 +1254,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 
 async def auto_settlement_background_task():
-    while True:
+    while Date := None:
         await asyncio.sleep(600)
 
 async def post_init(application: Application):
