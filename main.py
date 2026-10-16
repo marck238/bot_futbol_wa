@@ -2,6 +2,7 @@
 import logging
 import asyncio
 import math
+import gc
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -24,6 +25,7 @@ API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "")
 API_FOOTBALL_HOST = "v3.football.api-sports.io"
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "1588200613")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "NosticAdmin")  # Reemplaza con tu usuario real de Telegram
 
 # ==========================================
 # 🌐 SERVIDOR HTTP PARA EL HEALTH CHECK DE RENDER
@@ -722,8 +724,9 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "📞 <b>Soporte Técnico y Consultas VIP:</b>\n"
             "Si tienes dudas sobre tus pagos o necesitas asistencia con el bot, puedes contactar directamente a la administración:"
         )
+        support_link = f"https://t.me/{ADMIN_USERNAME}?text=Hola,%20necesito%20soporte%20técnico%20con%20el%20bot"
         support_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Contactar Soporte Técnico", url="https://t.me/TuContactoAdmin")],
+            [InlineKeyboardButton("💬 Contactar Soporte Técnico", url=support_link)],
             [InlineKeyboardButton("💎 Información Membresía VIP", callback_data="go_to_vip_menu")]
         ])
         await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=support_keyboard)
@@ -986,41 +989,53 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         all_candidate_picks = []
 
-        for fix in fixtures:
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            match_time = format_match_time(fix)
-            
-            analytics = await generate_comprehensive_analytics(fix)
-            dc = analytics["double_chance"]
+        # 🚀 PROCESAMIENTO POR LOTES OPTIMIZADO PARA TOP VALUE
+        batch_size = 10
+        for i in range(0, len(fixtures), batch_size):
+            batch = fixtures[i:i + batch_size]
+            batch_tasks = [generate_comprehensive_analytics(fix) for fix in batch]
+            batch_analytics_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-            markets_to_eval = [
-                ("MERCADO 1X2 (LOCAL)", analytics["market_1x2"]["p_home"], analytics["market_1x2"]["odds_home"], "1X2"),
-                ("MERCADO 1X2 (VISITA)", analytics["market_1x2"]["p_away"], analytics["market_1x2"]["odds_away"], "1X2"),
-                ("GOLES (OVER 2.5)", analytics["goals"]["p_over_25"], analytics["goals"]["odds_over"], "GOALS"),
-                ("AMBOS ANOTAN (BTTS)", analytics["goals"]["p_btts_yes"], analytics["goals"]["odds_btts_yes"], "GOALS"),
-                (f"DOBLE OPORTUNIDAD: {dc['selection']}", dc["probability"], dc["odds"], "DC"),
-                ("HANDICAP ASIÁTICO", analytics["asian_handicap"]["p_ah"], analytics["asian_handicap"]["odds_ah"], "AH")
-            ]
+            for idx, analytics in enumerate(batch_analytics_results):
+                if isinstance(analytics, Exception) or not analytics:
+                    continue
+                
+                fix = batch[idx]
+                fid = fix.get("fixture", {}).get("id", 0)
+                teams = fix.get("teams", {})
+                league = fix.get("league", {})
+                league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
+                home = teams.get("home", {}).get("name", "Local")
+                away = teams.get("away", {}).get("name", "Visitante")
+                match_time = format_match_time(fix)
+                
+                dc = analytics["double_chance"]
 
-            for m_title, prob, odds, m_short in markets_to_eval:
-                ev = (prob * odds) - 1
-                if prob >= 0.52 and ev > 0.03:
-                    stake = calculate_kelly_stake(prob, odds)
-                    details = analytics["context"] + f"• 🎯 <b>Oportunidad Top:</b> Alta expectativa matemática detectada en {m_title}."
-                    card = format_enriched_card(f"TOP VALUE: {m_title}", league_info, home, away, match_time, details, odds, prob, stake)
-                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_{m_short}_{odds}_{prob}")]])
-                    
-                    all_candidate_picks.append({
-                        "ev": ev,
-                        "probability": prob,
-                        "text": card,
-                        "reply_markup": btn
-                    })
+                markets_to_eval = [
+                    ("MERCADO 1X2 (LOCAL)", analytics["market_1x2"]["p_home"], analytics["market_1x2"]["odds_home"], "1X2"),
+                    ("MERCADO 1X2 (VISITA)", analytics["market_1x2"]["p_away"], analytics["market_1x2"]["odds_away"], "1X2"),
+                    ("GOLES (OVER 2.5)", analytics["goals"]["p_over_25"], analytics["goals"]["odds_over"], "GOALS"),
+                    ("AMBOS ANOTAN (BTTS)", analytics["goals"]["p_btts_yes"], analytics["goals"]["odds_btts_yes"], "GOALS"),
+                    (f"DOBLE OPORTUNIDAD: {dc['selection']}", dc["probability"], dc["odds"], "DC"),
+                    ("HANDICAP ASIÁTICO", analytics["asian_handicap"]["p_ah"], analytics["asian_handicap"]["odds_ah"], "AH")
+                ]
+
+                for m_title, prob, odds, m_short in markets_to_eval:
+                    ev = (prob * odds) - 1
+                    if prob >= 0.52 and ev > 0.03:
+                        stake = calculate_kelly_stake(prob, odds)
+                        details = analytics["context"] + f"• 🎯 <b>Oportunidad Top:</b> Alta expectativa matemática detectada en {m_title}."
+                        card = format_enriched_card(f"TOP VALUE: {m_title}", league_info, home, away, match_time, details, odds, prob, stake)
+                        btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Este Pick", callback_data=f"save_{fid}_{m_short}_{odds}_{prob}")]])
+                        
+                        all_candidate_picks.append({
+                            "ev": ev,
+                            "probability": prob,
+                            "text": card,
+                            "reply_markup": btn
+                        })
+
+            gc.collect()
 
         if not all_candidate_picks:
             await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros estrictos de valor esperado para esta fecha.")
@@ -1038,79 +1053,97 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prefix, selected_date, time_filter, limit_str = parts[1], parts[2], parts[3], parts[4]
         max_hours = 3 if time_filter == "3h" else (6 if time_filter == "6h" else (12 if time_filter == "12h" else None))
 
-        await query.message.edit_text(f"🔍 <b>Consultando tablas, H2H, bajas y noticias ({selected_date})...</b>", parse_mode="HTML")
+        await query.message.edit_text(f"🔍 <b>Escaneando partidos por lotes ({selected_date})... esto asegurará estabilidad en el servidor.</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date, max_hours=max_hours)
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos en ese rango.")
             return
 
         valid_predictions = []
-        for fix in fixtures:
-            fid = fix.get("fixture", {}).get("id", 0)
-            teams = fix.get("teams", {})
-            league = fix.get("league", {})
-            league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
-            home = teams.get("home", {}).get("name", "Local")
-            away = teams.get("away", {}).get("name", "Visitante")
-            match_time = format_match_time(fix)
+        
+        # 🚀 DIVIDIR EN LOTES DE 10 PARTIDOS MÁXIMO PARA PROTEGER LA RAM DE RENDER
+        batch_size = 10
+        for i in range(0, len(fixtures), batch_size):
+            batch = fixtures[i:i + batch_size]
             
-            analytics = await generate_comprehensive_analytics(fix)
+            batch_tasks = [generate_comprehensive_analytics(fix) for fix in batch]
+            batch_analytics_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-            if prefix == "catgoals":
-                g = analytics["goals"]
-                prob, odds = g["p_over_25"], g["odds_over"]
-                if prob < 0.50: continue
-                stake = calculate_kelly_stake(prob, odds)
-                details = analytics["context"] + "• ⚽ <b>Tendencia:</b> Alta frecuencia de goles en los últimos encuentros de ambos."
-                card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS_{odds}_{prob}")]])
+            for idx, analytics in enumerate(batch_analytics_results):
+                if isinstance(analytics, Exception) or not analytics:
+                    continue
+                
+                fix = batch[idx]
+                fid = fix.get("fixture", {}).get("id", 0)
+                teams = fix.get("teams", {})
+                league = fix.get("league", {})
+                league_info = f"{league.get('country', '')} - {league.get('name', 'Fútbol')}"
+                home = teams.get("home", {}).get("name", "Local")
+                away = teams.get("away", {}).get("name", "Visitante")
+                match_time = format_match_time(fix)
 
-            elif prefix == "cat1x2":
-                m = analytics["market_1x2"]
-                is_home_fav = m["p_home"] >= m["p_away"]
-                prob = m["p_home"] if is_home_fav else m["p_away"]
-                odds = m["odds_home"] if is_home_fav else m["odds_away"]
-                team_selected = home if is_home_fav else away
-                if prob < 0.52: continue
-                stake = calculate_kelly_stake(prob, odds)
-                details = analytics["context"] + f"• 🏆 <b>Superioridad:</b> Eficiencia consolidada de {team_selected} para llevarse el encuentro."
-                title_1x2 = f"GANADOR: {team_selected.upper()}"
-                card = format_enriched_card(title_1x2, league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {team_selected}", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
+                try:
+                    if prefix == "catgoals":
+                        g = analytics["goals"]
+                        prob, odds = g["p_over_25"], g["odds_over"]
+                        if prob < 0.50: continue
+                        stake = calculate_kelly_stake(prob, odds)
+                        details = analytics["context"] + "• ⚽ <b>Tendencia:</b> Alta frecuencia de goles estimada por Poisson."
+                        card = format_enriched_card("MERCADO GOLES (OVER 2.5)", league_info, home, away, match_time, details, odds, prob, stake)
+                        btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Over 2.5", callback_data=f"save_{fid}_GOALS_{odds}_{prob}")]])
 
-            elif prefix == "catdc":
-                dc = analytics["double_chance"]
-                prob, odds = dc["probability"], dc["odds"]
-                sel_name = dc["selection"]
-                if prob < 0.65: continue
-                stake = calculate_kelly_stake(prob, odds)
-                details = analytics["context"] + f"• 🛡️ <b>Resguardo:</b> Cobertura estadística sólida para la opción <b>{sel_name}</b>."
-                card = format_enriched_card(f"DOBLE OPORTUNIDAD: {sel_name}", league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {sel_name}", callback_data=f"save_{fid}_DC_{odds}_{prob}")]])
+                    elif prefix == "cat1x2":
+                        m = analytics["market_1x2"]
+                        is_home_fav = m["p_home"] >= m["p_away"]
+                        prob = m["p_home"] if is_home_fav else m["p_away"]
+                        odds = m["odds_home"] if is_home_fav else m["odds_away"]
+                        team_selected = home if is_home_fav else away
+                        if prob < 0.52: continue
+                        stake = calculate_kelly_stake(prob, odds)
+                        details = analytics["context"] + f"• 🏆 <b>Superioridad:</b> Eficiencia consolidada de {team_selected}."
+                        title_1x2 = f"GANADOR: {team_selected.upper()}"
+                        card = format_enriched_card(title_1x2, league_info, home, away, match_time, details, odds, prob, stake)
+                        btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {team_selected}", callback_data=f"save_{fid}_1X2_{odds}_{prob}")]])
 
-            elif prefix == "catah":
-                ah = analytics["asian_handicap"]
-                prob, odds = ah["p_ah"], ah["odds_ah"]
-                if prob < 0.52: continue
-                stake = calculate_kelly_stake(prob, odds)
-                team_selected = home if ah['selection'] == 'home' else away
-                line_title = f"HANDICAP ASIÁTICO: {team_selected.upper()} -0.5"
-                details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa a favor de {team_selected}."
-                card = format_enriched_card(line_title, league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {team_selected} -0.5", callback_data=f"save_{fid}_AH_{odds}_{prob}")]])
+                    elif prefix == "catdc":
+                        dc = analytics["double_chance"]
+                        prob, odds = dc["probability"], dc["odds"]
+                        sel_name = dc["selection"]
+                        if prob < 0.65: continue
+                        stake = calculate_kelly_stake(prob, odds)
+                        details = analytics["context"] + f"• 🛡️ <b>Resguardo:</b> Cobertura estadística para <b>{sel_name}</b>."
+                        card = format_enriched_card(f"DOBLE OPORTUNIDAD: {sel_name}", league_info, home, away, match_time, details, odds, prob, stake)
+                        btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {sel_name}", callback_data=f"save_{fid}_DC_{odds}_{prob}")]])
 
-            elif prefix == "catcorners":
-                cc = analytics["corners_cards"]
-                prob, odds = cc["p_corners"], cc["odds_corners_over"]
-                if prob < 0.52: continue
-                stake = calculate_kelly_stake(prob, odds)
-                details = analytics["context"] + f"• 📐 <b>Córners Promedio:</b> {cc['avg_corners']} saques de esquina estimados."
-                card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, stake)
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fid}_CORNERS_{odds}_{prob}")]])
-            else:
-                continue
+                    elif prefix == "catah":
+                        ah = analytics["asian_handicap"]
+                        prob, odds = ah["p_ah"], ah["odds_ah"]
+                        if prob < 0.52: continue
+                        stake = calculate_kelly_stake(prob, odds)
+                        team_selected = home if ah['selection'] == 'home' else away
+                        line_title = f"HANDICAP ASIÁTICO: {team_selected.upper()} -0.5"
+                        details = analytics["context"] + f"• ⚖️ <b>Hándicap (-0.5):</b> Selección directa a favor de {team_selected}."
+                        card = format_enriched_card(line_title, league_info, home, away, match_time, details, odds, prob, stake)
+                        btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"📌 Guardar {team_selected} -0.5", callback_data=f"save_{fid}_AH_{odds}_{prob}")]])
 
-            valid_predictions.append({"probability": prob, "text": card, "reply_markup": btn})
+                    elif prefix == "catcorners":
+                        cc = analytics["corners_cards"]
+                        prob, odds = cc["p_corners"], cc["odds_corners_over"]
+                        if prob < 0.52: continue
+                        stake = calculate_kelly_stake(prob, odds)
+                        details = analytics["context"] + f"• 📐 <b>Córners Promedio:</b> {cc['avg_corners']} saques de esquina estimados."
+                        card = format_enriched_card("CÓRNERS & TENDENCIAS", league_info, home, away, match_time, details, odds, prob, stake)
+                        btn = InlineKeyboardMarkup([[InlineKeyboardButton("📌 Guardar Córners", callback_data=f"save_{fid}_CORNERS_{odds}_{prob}")]])
+                    else:
+                        continue
+
+                    valid_predictions.append({"probability": prob, "text": card, "reply_markup": btn})
+                except Exception as match_err:
+                    logger.error(f"Error procesando partido en lote: {match_err}")
+                    continue
+
+            # 🧹 Forzar liberación de memoria RAM tras procesar cada lote
+            gc.collect()
 
         if not valid_predictions:
             await query.message.reply_text("ℹ️ Ningún partido cumple con los filtros para este rango.")
