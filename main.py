@@ -116,12 +116,32 @@ async def register_user_middleware(update: Update, context: ContextTypes.DEFAULT
                 exists = cur.fetchone()
                 
                 if not exists:
+                    # 1. Registrar nuevo usuario free en la base de datos
                     cur.execute("""
                         INSERT INTO bot_users (telegram_id, username) 
                         VALUES (%s, %s);
                     """, (user.id, user.username or user.first_name))
                     conn.commit()
                     
+                    # 2. 🚀 ENVIAR GANCHO CORTO AUTOMÁTICO A NUEVOS USUARIOS FREE
+                    short_welcome_free = (
+                        f"🔒 <b>¡Bienvenido a NosticProno Bot, {user.first_name}!</b>\n\n"
+                        "Estás viendo solo una fracción de lo que el bot puede hacer.\n\n"
+                        "Los usuarios VIP ya están escaneando los mejores 80 partidos del día con Poisson, H2H y apuestas de Valor (+EV)[cite: 1].\n\n"
+                        "💎 <b>Desbloquea todo el poder por solo $15.00 USD / mes.</b> Toca <b>\"💎 Solicitar Acceso VIP\"</b> en tu menú para empezar hoy."
+                    )
+                    
+                    try:
+                        if update.effective_chat:
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text=short_welcome_free,
+                                parse_mode="HTML"
+                            )
+                    except Exception as e:
+                        logger.error(f"Error enviando mensaje de bienvenida al nuevo usuario: {e}")
+
+                    # 3. Notificar al administrador
                     if ADMIN_TELEGRAM_ID:
                         alert_text = (
                             "🔔 <b>¡Nuevo Usuario en el Bot!</b>\n\n"
@@ -225,7 +245,7 @@ def get_top_value_limit_keyboard(date_str: str):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# 🛠️ NUEVOS RANGOS HORARIOS NO SUPERPUESTOS
+# 🛠️ RANGOS HORARIOS NO SUPERPUESTOS
 def get_timeframe_keyboard(prefix: str):
     tz = timezone(timedelta(hours=-3))
     hoy_str = datetime.now(tz).strftime('%Y-%m-%d')
@@ -1000,7 +1020,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         selected_date = parts[1]
         limit_num = int(parts[2])
 
-        await query.message.edit_text(f"🔍 <b>Analizando partidos del día {selected_date} para extraer Top Value...</b>", parse_mode="HTML")
+        await query.message.reply_text(f"🔍 <b>Analizando partidos del día {selected_date} para extraer Top Value...</b>", parse_mode="HTML")
         fixtures = await fetch_fixtures_from_api(selected_date, time_filter="all")
         if not fixtures:
             await query.message.reply_text("⚠️ No se encontraron partidos para esa fecha.")
@@ -1254,7 +1274,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 
 async def auto_settlement_background_task():
-    while Date := None:
+    while True:
         await asyncio.sleep(600)
 
 async def post_init(application: Application):
